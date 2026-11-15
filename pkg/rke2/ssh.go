@@ -3,6 +3,8 @@ package rke2
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -59,8 +61,9 @@ func Dial(ctx context.Context, opts SSHOptions) (Runner, error) {
 	}
 	addr := net.JoinHostPort(opts.Host, strconv.Itoa(port))
 
-	lookup := addr
+	display, lookup := addr, addr
 	if opts.HostKeyAlias != "" {
+		display = opts.HostKeyAlias
 		lookup = net.JoinHostPort(opts.HostKeyAlias, "22") // known_hosts stores a default-port entry as the bare name
 	}
 	callback := func(_ string, remote net.Addr, key ssh.PublicKey) error {
@@ -72,12 +75,12 @@ func Dial(ctx context.Context, opts SSHOptions) (Runner, error) {
 		if errors.As(err, &keyErr) {
 			if len(keyErr.Want) == 0 {
 				return fmt.Errorf("host %s is not in known_hosts file %s; add its key (for example with ssh-keyscan) after verifying it: %w",
-					lookup, opts.KnownHostsPath, err)
+					display, opts.KnownHostsPath, err)
 			}
 			return fmt.Errorf("host key for %s does not match known_hosts file %s; refusing to connect: %w",
-				lookup, opts.KnownHostsPath, err)
+				display, opts.KnownHostsPath, err)
 		}
-		return fmt.Errorf("verifying host key for %s against %s: %w", lookup, opts.KnownHostsPath, err)
+		return fmt.Errorf("verifying host key for %s against %s: %w", display, opts.KnownHostsPath, err)
 	}
 
 	cfg := &ssh.ClientConfig{
@@ -85,6 +88,11 @@ func Dial(ctx context.Context, opts SSHOptions) (Runner, error) {
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: callback,
 		Timeout:         dialTimeout,
+	}
+	// Offer only key types known_hosts holds for this host. The callback
+	// above still verifies the key the server presents.
+	if algs, err := knownAlgorithms(check, lookup); err == nil {
+		cfg.HostKeyAlgorithms = algs
 	}
 
 	d := net.Dialer{Timeout: dialTimeout}
@@ -98,6 +106,41 @@ func Dial(ctx context.Context, opts SSHOptions) (Runner, error) {
 		return nil, fmt.Errorf("ssh handshake with %s: %w", addr, err)
 	}
 	return &sshRunner{client: ssh.NewClient(cc, chans, reqs), sudo: opts.User != "root"}, nil
+}
+
+// knownAlgorithms returns the host key algorithms known_hosts lists for
+// lookup, de-duplicated and in file order, or nil when the host is unlisted.
+// It probes check with a throwaway key, which can never match: knownhosts
+// reports the keys it holds for the host in the resulting KeyError.
+func knownAlgorithms(check ssh.HostKeyCallback, lookup string) ([]string, error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	probe, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		return nil, err
+	}
+	err = check(lookup, &net.TCPAddr{IP: net.IPv4zero}, probe.PublicKey())
+	var keyErr *knownhosts.KeyError
+	if !errors.As(err, &keyErr) {
+		return nil, nil
+	}
+	var algs []string
+	seen := map[string]bool{}
+	for _, k := range keyErr.Want {
+		names := []string{k.Key.Type()}
+		if k.Key.Type() == ssh.KeyAlgoRSA {
+			names = []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+		}
+		for _, n := range names {
+			if !seen[n] {
+				seen[n] = true
+				algs = append(algs, n)
+			}
+		}
+	}
+	return algs, nil
 }
 
 // shellQuote single-quotes s for a POSIX shell.

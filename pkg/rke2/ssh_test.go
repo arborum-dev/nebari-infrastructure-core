@@ -2,7 +2,9 @@ package rke2
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
@@ -79,8 +81,28 @@ func writeClientKey(t *testing.T) (string, ssh.PublicKey) {
 
 func startServer(t *testing.T, handler func(cmd string) reply) *testServer {
 	t.Helper()
+	return startServerWithKeys(t, handler, newSigner(t))
+}
+
+func newECDSASigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// startServerWithKeys starts a server offering every given host key. hostKey
+// is the first one.
+func startServerWithKeys(t *testing.T, handler func(cmd string) reply, hostSigners ...ssh.Signer) *testServer {
+	t.Helper()
 	keyPath, clientPub := writeClientKey(t)
-	hostSigner := newSigner(t)
+	hostSigner := hostSigners[0]
 
 	cfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
@@ -90,7 +112,9 @@ func startServer(t *testing.T, handler func(cmd string) reply) *testServer {
 			return nil, errors.New("unauthorized key")
 		},
 	}
-	cfg.AddHostKey(hostSigner)
+	for _, hs := range hostSigners {
+		cfg.AddHostKey(hs)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -369,5 +393,32 @@ func TestRun_ContextCancelled(t *testing.T) {
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestDial_HostKeyAlgorithmFollowsKnownHosts(t *testing.T) {
+	ecdsaKey := newECDSASigner(t)
+	ed25519Key := newSigner(t)
+
+	tests := []struct {
+		name   string
+		listed ssh.Signer
+	}{
+		{"only ed25519 listed", ed25519Key},
+		{"only ecdsa listed", ecdsaKey},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := startServerWithKeys(t, okHandler, ecdsaKey, ed25519Key)
+			kh := knownHostsFile(t, tt.listed.PublicKey(), "lima-colima-rke2")
+			opts := s.opts("root", kh)
+			opts.HostKeyAlias = "lima-colima-rke2"
+
+			r, err := Dial(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			_ = r.Close()
+		})
 	}
 }
