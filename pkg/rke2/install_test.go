@@ -106,6 +106,18 @@ func TestPlanInstall(t *testing.T) {
 			want:  Plan{Enable: true},
 		},
 		{
+			name:    "not installed but service active",
+			state:   State{ServiceActive: true},
+			opts:    opts(testV1, true),
+			wantErr: "/opt/rke2/bin/rke2",
+		},
+		{
+			name:    "not installed but service enabled",
+			state:   State{ServiceEnabled: true},
+			opts:    opts(testV1, true),
+			wantErr: "binary was not found",
+		},
+		{
 			name:    "unparsable installed version",
 			state:   State{InstalledVersion: "garbage", Config: cfg},
 			opts:    opts(testV1, true),
@@ -192,7 +204,7 @@ func TestInspect(t *testing.T) {
 		{
 			name: "installed, active and enabled",
 			responses: []rke2test.Response{
-				{Match: "rke2 --version", Stdout: "rke2 version " + testV1 + " (abc123)\ngo version go1.24\n"},
+				{Match: "--version", Stdout: "rke2 version " + testV1 + " (abc123)\ngo version go1.24\n"},
 				{Match: "is-active", Stdout: "active\n"},
 				{Match: "is-enabled", Stdout: "enabled\n"},
 			},
@@ -202,7 +214,7 @@ func TestInspect(t *testing.T) {
 		{
 			name: "installed, inactive and disabled",
 			responses: []rke2test.Response{
-				{Match: "rke2 --version", Stdout: "rke2 version " + testV1 + " (abc123)\n"},
+				{Match: "--version", Stdout: "rke2 version " + testV1 + " (abc123)\n"},
 				{Match: "is-active", Stdout: "inactive\n"},
 				{Match: "is-enabled", Stdout: "disabled\n"},
 			},
@@ -213,9 +225,16 @@ func TestInspect(t *testing.T) {
 			want: State{},
 		},
 		{
+			name: "binary present but --version fails",
+			responses: []rke2test.Response{
+				{Match: "--version", Err: &ExitError{Code: 126, Stderr: "exec format error"}},
+			},
+			wantErr: true,
+		},
+		{
 			name: "unrecognised version output",
 			responses: []rke2test.Response{
-				{Match: "rke2 --version", Stdout: "something odd\n"},
+				{Match: "--version", Stdout: "something odd\n"},
 			},
 			wantErr: true,
 		},

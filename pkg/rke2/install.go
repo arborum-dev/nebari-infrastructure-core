@@ -132,6 +132,15 @@ func Check(ctx context.Context, r Runner) error {
 	return nil
 }
 
+// binaryPaths are where the RKE2 install script puts the binary. The probe
+// uses absolute paths because sudo's secure_path may not include them.
+var binaryPaths = []string{"/usr/local/bin/rke2", "/usr/bin/rke2", "/opt/rke2/bin/rke2"}
+
+// versionProbe prints the version of the first binary found, and nothing (exit
+// 0) when there is none. A binary whose --version fails makes the script fail.
+var versionProbe = "for b in " + strings.Join(binaryPaths, " ") +
+	`; do [ -x "$b" ] && exec "$b" --version; done; true`
+
 var versionOutput = regexp.MustCompile(`^rke2 version (\S+)`)
 
 // Inspect reads the current RKE2 state from the host. Absent things are
@@ -139,7 +148,7 @@ var versionOutput = regexp.MustCompile(`^rke2 version (\S+)`)
 func Inspect(ctx context.Context, r Runner) (State, error) {
 	var s State
 
-	out, err := r.Run(ctx, "command -v rke2 >/dev/null 2>&1 && rke2 --version || true")
+	out, err := r.Run(ctx, versionProbe)
 	if err != nil {
 		return State{}, fmt.Errorf("read RKE2 version: %w", err)
 	}
@@ -188,6 +197,10 @@ func PlanInstall(s State, o Options) (Plan, error) {
 
 	var p Plan
 	installed := s.InstalledVersion != ""
+	if !installed && (s.ServiceActive || s.ServiceEnabled) {
+		return Plan{}, fmt.Errorf("%s exists but the rke2 binary was not found at %s; refusing to install over it",
+			ServiceName, strings.Join(binaryPaths, ", "))
+	}
 	if installed {
 		have, err := ParseVersion(s.InstalledVersion)
 		if err != nil {
