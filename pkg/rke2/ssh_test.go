@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -420,5 +421,80 @@ func TestDial_HostKeyAlgorithmFollowsKnownHosts(t *testing.T) {
 			}
 			_ = r.Close()
 		})
+	}
+}
+
+// silentListener accepts TCP connections and never speaks SSH.
+func silentListener(t *testing.T) (host string, port int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return "127.0.0.1", ln.Addr().(*net.TCPAddr).Port
+}
+
+func silentOpts(t *testing.T) SSHOptions {
+	t.Helper()
+	s := startServer(t, okHandler) // supplies a valid client key
+	host, port := silentListener(t)
+	opts := s.opts("root", knownHostsFile(t, s.hostKey, s.addr))
+	opts.Host, opts.Port = host, port
+	return opts
+}
+
+func TestDial_StalledHandshakeTimesOut(t *testing.T) {
+	old := dialTimeout
+	dialTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { dialTimeout = old })
+
+	opts := silentOpts(t)
+	done := make(chan error, 1)
+	go func() { _, err := Dial(context.Background(), opts); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Dial succeeded against a silent peer")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Dial did not time out")
+	}
+}
+
+func TestDial_ContextCancelDuringHandshake(t *testing.T) {
+	opts := silentOpts(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := Dial(ctx, opts); done <- err }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Dial succeeded against a silent peer")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Dial ignored context cancellation")
 	}
 }

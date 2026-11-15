@@ -22,7 +22,8 @@ import (
 // notExistExit is the exit status ReadFile's script uses for a missing file.
 const notExistExit = 66
 
-const dialTimeout = 30 * time.Second
+// dialTimeout bounds the TCP connect and SSH handshake; tests shorten it.
+var dialTimeout = 30 * time.Second
 
 // SSHOptions configures an SSH connection to the target host.
 type SSHOptions struct {
@@ -87,7 +88,6 @@ func Dial(ctx context.Context, opts SSHOptions) (Runner, error) {
 		User:            opts.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: callback,
-		Timeout:         dialTimeout,
 	}
 	// Offer only key types known_hosts holds for this host. The callback
 	// above still verifies the key the server presents.
@@ -100,10 +100,36 @@ func Dial(ctx context.Context, opts SSHOptions) (Runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", addr, err)
 	}
+
+	// NewClientConn ignores ClientConfig.Timeout, so bound the handshake here
+	// and abort it if ctx is cancelled.
+	if err := conn.SetDeadline(time.Now().Add(dialTimeout)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("setting handshake deadline for %s: %w", addr, err)
+	}
+	handshakeDone := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-handshakeDone:
+		}
+	}()
 	cc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	close(handshakeDone)
+	<-watcherDone
 	if err != nil {
 		_ = conn.Close()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("ssh handshake with %s: %w", addr, ctxErr)
+		}
 		return nil, fmt.Errorf("ssh handshake with %s: %w", addr, err)
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = cc.Close()
+		return nil, fmt.Errorf("clearing handshake deadline for %s: %w", addr, err)
 	}
 	return &sshRunner{client: ssh.NewClient(cc, chans, reqs), sudo: opts.User != "root"}, nil
 }
