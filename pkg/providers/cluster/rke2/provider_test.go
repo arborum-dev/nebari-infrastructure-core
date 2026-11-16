@@ -431,6 +431,95 @@ func TestGetKubeconfig_CachedPerProcess(t *testing.T) {
 	}
 }
 
+// TestGetKubeconfig_ServiceState checks that a kubeconfig is returned only
+// while RKE2 runs, so NIC treats a stopped RKE2 as an unreachable cluster.
+func TestGetKubeconfig_ServiceState(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    func(t *testing.T) *rke2test.FakeRunner
+		wantErr bool
+	}{
+		{name: "running", host: func(t *testing.T) *rke2test.FakeRunner { return installedHost(t, testVersion) }},
+		{
+			name: "installed but stopped",
+			host: func(t *testing.T) *rke2test.FakeRunner {
+				h := installedHost(t, testVersion)
+				h.SimulateInstalled(testVersion, false, true, nil)
+				return h
+			},
+			wantErr: true,
+		},
+		{name: "never installed", host: func(*testing.T) *rke2test.FakeRunner { return rke2test.NewHost("Linux") }, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakes(tt.host(t))
+			p := f.provider()
+			ctx := context.Background()
+			cfg := clusterConfig(rke2Block())
+
+			kubeconfig, err := p.GetKubeconfig(ctx, testProject, cfg)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("GetKubeconfig: %v", err)
+				}
+				if got, want := serverOf(t, kubeconfig), "https://"+testAPIServer+":6443"; got != want {
+					t.Errorf("server = %q, want %q", got, want)
+				}
+				if _, ok := p.cachedKubeconfig(testProject); !ok {
+					t.Error("kubeconfig was not cached")
+				}
+				return
+			}
+
+			if !errors.Is(err, ErrRKE2NotRunning) {
+				t.Fatalf("GetKubeconfig error = %v, want one wrapping ErrRKE2NotRunning", err)
+			}
+			for _, want := range []string{testHost, "nic deploy"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("GetKubeconfig error %q does not mention %q", err, want)
+				}
+			}
+			if kubeconfig != nil {
+				t.Errorf("GetKubeconfig returned a kubeconfig with the error: %s", kubeconfig)
+			}
+			if _, ok := p.cachedKubeconfig(testProject); ok {
+				t.Error("a kubeconfig was cached although RKE2 is not running")
+			}
+			if got := ranServiceChange(f.host.FakeRunner); len(got) != 0 {
+				t.Errorf("GetKubeconfig changed the service: %v", got)
+			}
+			if f.host.closed != 1 {
+				t.Errorf("Close called %d times, want 1", f.host.closed)
+			}
+		})
+	}
+}
+
+// TestDeploy_StoppedHostThenGetKubeconfig checks that Deploy's own cache
+// serves GetKubeconfig without a second connection or a service check.
+func TestDeploy_StoppedHostThenGetKubeconfig(t *testing.T) {
+	h := installedHost(t, testVersion)
+	h.SimulateInstalled(testVersion, false, true, nil)
+	f := newFakes(h)
+	p := f.provider()
+	ctx := context.Background()
+	cfg := clusterConfig(rke2Block())
+
+	if err := p.Deploy(ctx, testProject, cfg, cluster.DeployOptions{}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if !f.host.Ran("systemctl start " + rke2host.ServiceName) {
+		t.Errorf("Deploy did not start the stopped service: %q", f.host.Calls)
+	}
+	if _, err := p.GetKubeconfig(ctx, testProject, cfg); err != nil {
+		t.Fatalf("GetKubeconfig after Deploy: %v", err)
+	}
+	if f.dials != 1 {
+		t.Errorf("dialled %d times across Deploy and GetKubeconfig, want 1", f.dials)
+	}
+}
+
 func TestValidate_MissingKeyFile(t *testing.T) {
 	dir := t.TempDir()
 	key := filepath.Join(dir, "id_ed25519")

@@ -25,6 +25,10 @@ const ProviderName = "rke2"
 // LonghornDataDir is where Longhorn keeps volume data on the host.
 const LonghornDataDir = "/var/lib/longhorn"
 
+// ErrRKE2NotRunning is wrapped by GetKubeconfig's error when the RKE2
+// service on the host is not running, so the cluster's API cannot answer.
+var ErrRKE2NotRunning = errors.New("RKE2 is not running")
+
 // Provider is the NIC cluster provider for one existing host on which NIC
 // installs and manages RKE2 over SSH. Its function fields are the seams to the
 // host, the cluster and Longhorn; NewProvider wires the real ones.
@@ -356,7 +360,11 @@ func (p *Provider) forgetKubeconfig(projectName string) {
 // GetKubeconfig returns the cluster's admin kubeconfig, pointed at
 // https://<api_server_address>:6443. It reads the kubeconfig from the host
 // over SSH the first time and caches it per project for the life of the
-// process.
+// process. Before reading it, it checks the RKE2 service over SSH, not the
+// API: when the service is not running it returns an error wrapping
+// ErrRKE2NotRunning and caches nothing, so NIC treats the cluster as
+// unreachable. A cached kubeconfig, including the one Deploy stores, is
+// returned without contacting the host.
 func (p *Provider) GetKubeconfig(ctx context.Context, projectName string, clusterConfig *config.ClusterConfig) ([]byte, error) {
 	tracer := otel.Tracer("nebari-infrastructure-core")
 	ctx, span := tracer.Start(ctx, "rke2.GetKubeconfig")
@@ -391,6 +399,20 @@ func (p *Provider) GetKubeconfig(ctx context.Context, projectName string, cluste
 	}
 	// The kubeconfig has been read in full; a failed Close does not affect it.
 	defer func() { _ = r.Close() }()
+
+	// rke2.yaml outlives a stopped service, so its presence says nothing about
+	// whether the API can answer.
+	state, err := rke2host.Inspect(ctx, r)
+	if err != nil {
+		err = fmt.Errorf("inspect RKE2 host %s: %w", cfg.Host, err)
+		span.RecordError(err)
+		return nil, err
+	}
+	if !state.ServiceActive {
+		err = fmt.Errorf("%w on %s; run nic deploy to start it", ErrRKE2NotRunning, cfg.Host)
+		span.RecordError(err)
+		return nil, err
+	}
 
 	kubeconfig, err := rke2host.FetchKubeconfig(ctx, r, cfg.apiServerAddress())
 	if err != nil {
