@@ -256,3 +256,65 @@ func TestLonghornConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigUnmarshal_SpecExample parses the cluster block from the design's
+// "Config block" section verbatim, including the empty forms.
+func TestConfigUnmarshal_SpecExample(t *testing.T) {
+	const doc = `
+cluster:
+  rke2:
+    host: 203.0.113.10 # address to open the SSH connection to
+    version: v1.37.2+rke2r1 # required; an exact RKE2 release
+    ssh:
+      user: root # default root
+      port: 22 # default 22
+      private_key_path: /path/to/key # required
+      known_hosts_path: /path/to/known_hosts # default ~/.ssh/known_hosts
+      host_key_alias: "" # optional; name to look up in known_hosts
+    api_server_address: "" # default: host
+    start_on_boot: true # default true
+    config: {} # extra keys for /etc/rancher/rke2/config.yaml
+    longhorn: # NIC's existing longhorn block
+      replica_count: 1
+`
+	var top struct {
+		Cluster map[string]any `yaml:"cluster"`
+	}
+	if err := yaml.Unmarshal([]byte(doc), &top); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	var got Config
+	if err := config.UnmarshalProviderConfig(context.Background(), top.Cluster["rke2"], &got); err != nil {
+		t.Fatalf("UnmarshalProviderConfig: %v", err)
+	}
+
+	if got.Host != "203.0.113.10" || got.Version != "v1.37.2+rke2r1" {
+		t.Errorf("Host/Version = %q/%q", got.Host, got.Version)
+	}
+	wantSSH := SSHConfig{User: "root", Port: 22, PrivateKeyPath: "/path/to/key", KnownHostsPath: "/path/to/known_hosts"}
+	if got.SSH != wantSSH {
+		t.Errorf("SSH = %+v, want %+v", got.SSH, wantSSH)
+	}
+	if got.APIServerAddress != "" {
+		t.Errorf("APIServerAddress = %q, want empty", got.APIServerAddress)
+	}
+	if len(got.Config) != 0 {
+		t.Errorf("Config = %#v, want empty", got.Config)
+	}
+	if err := got.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil", err)
+	}
+	opts := got.RKE2Options()
+	if opts.APIServerAddress != "203.0.113.10" {
+		t.Errorf("RKE2Options().APIServerAddress = %q, want host", opts.APIServerAddress)
+	}
+	if !opts.StartOnBoot {
+		t.Error("RKE2Options().StartOnBoot = false, want true")
+	}
+	if got.StartOnBoot == nil || !*got.StartOnBoot {
+		t.Errorf("StartOnBoot = %v, want pointer to true", got.StartOnBoot)
+	}
+	if rc := got.LonghornConfig().ReplicaCount; rc != 1 {
+		t.Errorf("LonghornConfig().ReplicaCount = %d, want 1", rc)
+	}
+}
