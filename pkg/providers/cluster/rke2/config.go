@@ -76,7 +76,9 @@ type SSHConfig struct {
 }
 
 // Settings holds the RKE2 options that a provider creating its own host can
-// reuse.
+// reuse. In cluster.rke2 these keys sit directly under the block, not under a
+// settings: key; a provider that creates hosts can expose them as a named
+// sub-block.
 type Settings struct {
 	// Version is the exact RKE2 release tag to run, such as v1.37.2+rke2r1.
 	// There is no "latest". Required.

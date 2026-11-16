@@ -44,7 +44,9 @@ key against known_hosts; there is no way to skip that check.
 ## Settings
 
 Settings holds the RKE2 options that a provider creating its own host can
-reuse.
+reuse. In cluster.rke2 these keys sit directly under the block, not under a
+settings: key; a provider that creates hosts can expose them as a named
+sub-block.
 
 | Field | YAML Key | Type | Required | Description |
 |-------|----------|------|----------|-------------|

@@ -28,7 +28,8 @@ cluster:
     # Enable the RKE2 service at boot. Defaults to true.
     start_on_boot: true
     # Extra keys written to /etc/rancher/rke2/config.yaml. They replace the
-    # provider's defaults key by key.
+    # provider's defaults key by key, except tls-san, which always also
+    # contains api_server_address.
     config: {}
     # Longhorn is installed when this block is omitted. With one node the
     # replica count defaults to 1.
