@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -428,6 +429,63 @@ func TestGetKubeconfig_CachedPerProcess(t *testing.T) {
 	}
 	if f.dials != 2 {
 		t.Errorf("dialled %d times after a second project, want 2", f.dials)
+	}
+}
+
+// deadlineIn returns how far ctx's deadline is from now, failing the test
+// when ctx has none.
+func deadlineIn(t *testing.T, ctx context.Context) time.Duration {
+	t.Helper()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("context has no deadline")
+	}
+	return time.Until(deadline)
+}
+
+// TestTimeouts checks that Deploy and Destroy bound their work by
+// opts.Timeout, or by their own default when it is not set.
+func TestTimeouts(t *testing.T) {
+	tests := []struct {
+		name    string
+		destroy bool
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{name: "deploy default", want: 45 * time.Minute},
+		{name: "deploy negative uses default", timeout: -time.Second, want: 45 * time.Minute},
+		{name: "deploy explicit", timeout: 5 * time.Minute, want: 5 * time.Minute},
+		{name: "destroy default", destroy: true, want: 30 * time.Minute},
+		{name: "destroy explicit", destroy: true, timeout: 5 * time.Minute, want: 5 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var left time.Duration
+			if tt.destroy {
+				f := newFakes(destroyHost(t, true))
+				p := f.provider()
+				p.apiReachable = func(ctx context.Context, _ []byte) bool {
+					left = deadlineIn(t, ctx)
+					return false
+				}
+				if err := p.Destroy(context.Background(), testProject, clusterConfig(rke2Block()), cluster.DestroyOptions{Timeout: tt.timeout}); err != nil {
+					t.Fatalf("Destroy: %v", err)
+				}
+			} else {
+				f := newFakes(installedHost(t, testVersion))
+				p := f.provider()
+				p.waitReady = func(ctx context.Context, _ []byte) error {
+					left = deadlineIn(t, ctx)
+					return nil
+				}
+				if err := p.Deploy(context.Background(), testProject, clusterConfig(rke2Block()), cluster.DeployOptions{Timeout: tt.timeout}); err != nil {
+					t.Fatalf("Deploy: %v", err)
+				}
+			}
+			if left > tt.want || left < tt.want-time.Minute {
+				t.Errorf("deadline is %s away, want about %s", left, tt.want)
+			}
+		})
 	}
 }
 

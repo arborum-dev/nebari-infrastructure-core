@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,6 +25,19 @@ const ProviderName = "rke2"
 
 // LonghornDataDir is where Longhorn keeps volume data on the host.
 const LonghornDataDir = "/var/lib/longhorn"
+
+// Default budgets for Deploy and Destroy when the caller sets no timeout.
+// Without one, a service stuck starting, a stalled download or a dead SSH
+// connection would block NIC forever.
+const (
+	// defaultDeployTimeout covers the install script, starting RKE2 (which
+	// includes its first image pulls), the 10-minute node wait and about 13
+	// minutes for Longhorn's install.
+	defaultDeployTimeout = 45 * time.Minute
+	// defaultDestroyTimeout covers RKE2's uninstall script and the 10-minute
+	// Longhorn uninstall.
+	defaultDestroyTimeout = 30 * time.Minute
+)
 
 // ErrRKE2NotRunning is wrapped by GetKubeconfig's error when the RKE2
 // service on the host is not running, so the cluster's API cannot answer.
@@ -161,11 +175,12 @@ func (p *Provider) Deploy(ctx context.Context, projectName string, clusterConfig
 		attribute.String("rke2_version", cfg.Version),
 	)
 
-	if opts.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
-		defer cancel()
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = defaultDeployTimeout
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	sshOpts, err := cfg.SSHOptions()
 	if err != nil {
@@ -270,11 +285,12 @@ func (p *Provider) Destroy(ctx context.Context, projectName string, clusterConfi
 	}
 	span.SetAttributes(attribute.String("host", cfg.Host))
 
-	if opts.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
-		defer cancel()
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = defaultDestroyTimeout
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	sshOpts, err := cfg.SSHOptions()
 	if err != nil {
