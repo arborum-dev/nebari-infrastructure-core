@@ -19,6 +19,7 @@ This directory contains auto-generated documentation for Nebari Infrastructure C
 - [GCP Provider Configuration](gcp.md) - Configuration options specific to Google Cloud Platform (GKE).
 - [Hetzner Provider Configuration](hetzner.md) - Configuration options specific to Hetzner Cloud.
 - [Local Provider Configuration](local.md) - Configuration options for local Kubernetes deployments.
+- [RKE2 Provider Configuration](rke2.md) - Configuration options for a single-node RKE2 cluster installed on an existing host over SSH.
 
 ### Additional Configuration
 
