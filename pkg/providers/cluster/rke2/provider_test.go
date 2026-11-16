@@ -285,7 +285,7 @@ func TestDeploy_DryRun(t *testing.T) {
 	}
 
 	close(updates)
-	reported := false
+	reported, reportedLonghorn := false, false
 	for u := range updates {
 		if u.Resource != "provider" || u.Action != "deploy" {
 			t.Errorf("update %q has resource %q and action %q, want provider and deploy", u.Message, u.Resource, u.Action)
@@ -293,9 +293,15 @@ func TestDeploy_DryRun(t *testing.T) {
 		if strings.Contains(u.Message, "install RKE2 "+testVersion) {
 			reported = true
 		}
+		if u.Message == "Dry run: would install Longhorn with 1 replica(s)" {
+			reportedLonghorn = true
+		}
 	}
 	if !reported {
 		t.Error("dry run did not report the planned install")
+	}
+	if !reportedLonghorn {
+		t.Error("dry run did not report the Longhorn install")
 	}
 }
 

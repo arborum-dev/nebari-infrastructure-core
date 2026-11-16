@@ -218,6 +218,11 @@ func (p *Provider) Deploy(ctx context.Context, projectName string, clusterConfig
 			status.Send(ctx, status.NewUpdate(status.LevelInfo, "Dry run: would "+line).
 				WithResource("provider").WithAction("deploy"))
 		}
+		if cfg.LonghornEnabled() {
+			status.Send(ctx, status.NewUpdate(status.LevelInfo,
+				fmt.Sprintf("Dry run: would install Longhorn with %d replica(s)", cfg.LonghornConfig().ReplicaCount)).
+				WithResource("provider").WithAction("deploy"))
+		}
 		return nil
 	}
 
