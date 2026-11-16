@@ -302,26 +302,32 @@ func (p *Provider) Destroy(ctx context.Context, projectName string, clusterConfi
 	// From here the host may change, so whatever was cached no longer holds.
 	defer p.forgetKubeconfig(projectName)
 
-	// Read the kubeconfig fresh: the cache may predate the host's last state.
+	// Longhorn is the only reason to read the kubeconfig, so without it the
+	// host is not asked. The kubeconfig is read fresh: the cache may predate
+	// the host's last state. A missing one means a host never deployed or
+	// already destroyed; an unreadable one is treated like an API that does
+	// not answer. Neither stops the destroy.
 	var longhornErr error
-	kubeconfig, err := rke2host.FetchKubeconfig(ctx, r, cfg.apiServerAddress())
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		kubeconfig = nil
-	case err != nil:
-		return fail(fmt.Errorf("fetch kubeconfig from RKE2 host %s: %w", cfg.Host, err))
-	}
-
-	if kubeconfig != nil && cfg.LonghornEnabled() && p.apiReachable(ctx, kubeconfig) {
-		status.Send(ctx, status.NewUpdate(status.LevelProgress, "Uninstalling Longhorn").
-			WithResource("provider").WithAction("destroy"))
-		if err := p.longhornUninstall(ctx, kubeconfig); err != nil {
-			longhornErr = fmt.Errorf("failed to uninstall Longhorn: %w", err)
-			if !opts.Force {
-				return fail(longhornErr)
-			}
-			status.Send(ctx, status.NewUpdate(status.LevelWarning, longhornErr.Error()+"; continuing because of --force").
+	if cfg.LonghornEnabled() {
+		kubeconfig, err := rke2host.FetchKubeconfig(ctx, r, cfg.apiServerAddress())
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// Nothing to uninstall Longhorn from.
+		case err != nil:
+			status.Send(ctx, status.NewUpdate(status.LevelWarning,
+				fmt.Sprintf("could not read the kubeconfig, skipping Longhorn uninstall: %v", err)).
 				WithResource("provider").WithAction("destroy"))
+		case p.apiReachable(ctx, kubeconfig):
+			status.Send(ctx, status.NewUpdate(status.LevelProgress, "Uninstalling Longhorn").
+				WithResource("provider").WithAction("destroy"))
+			if err := p.longhornUninstall(ctx, kubeconfig); err != nil {
+				longhornErr = fmt.Errorf("failed to uninstall Longhorn: %w", err)
+				if !opts.Force {
+					return fail(longhornErr)
+				}
+				status.Send(ctx, status.NewUpdate(status.LevelWarning, longhornErr.Error()+"; continuing because of --force").
+					WithResource("provider").WithAction("destroy"))
+			}
 		}
 	}
 

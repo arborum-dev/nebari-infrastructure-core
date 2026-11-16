@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,6 +84,12 @@ func renderedConfig(t *testing.T) []byte {
 type closeCountingHost struct {
 	*rke2test.FakeRunner
 	closed int
+	reads  []string // every path passed to ReadFile
+}
+
+func (h *closeCountingHost) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	h.reads = append(h.reads, path)
+	return h.FakeRunner.ReadFile(ctx, path)
 }
 
 func (h *closeCountingHost) Close() error {
@@ -566,7 +573,7 @@ type destroyRun struct {
 	callsAtLonghorn int
 }
 
-func (r destroyRun) ranScript(h *rke2test.FakeRunner) bool {
+func ranScript(h *rke2test.FakeRunner) bool {
 	for _, c := range h.Calls {
 		if c == quotedUninstallScript {
 			return true
@@ -576,7 +583,7 @@ func (r destroyRun) ranScript(h *rke2test.FakeRunner) bool {
 }
 
 func ranRemoveData(h *rke2test.FakeRunner) bool {
-	return h.Ran("rm -rf -- ") && h.Ran(LonghornDataDir)
+	return slices.Contains(h.Calls, "rm -rf -- '"+LonghornDataDir+"'")
 }
 
 func runDestroy(f *fakes, reachable bool, longhornErr error, block map[string]any, opts cluster.DestroyOptions) destroyRun {
@@ -608,7 +615,7 @@ func TestDestroy_RunningCluster(t *testing.T) {
 			t.Errorf("%q ran before longhornUninstall", c)
 		}
 	}
-	if !run.ranScript(f.host.FakeRunner) {
+	if !ranScript(f.host.FakeRunner) {
 		t.Error("RKE2 uninstall script did not run")
 	}
 	if !ranRemoveData(f.host.FakeRunner) {
@@ -636,7 +643,7 @@ func TestDestroy_StoppedCluster(t *testing.T) {
 	if got := ranServiceChange(f.host.FakeRunner); len(got) != 0 {
 		t.Errorf("Destroy changed the service: %v", got)
 	}
-	if !run.ranScript(f.host.FakeRunner) || !ranRemoveData(f.host.FakeRunner) {
+	if !ranScript(f.host.FakeRunner) || !ranRemoveData(f.host.FakeRunner) {
 		t.Errorf("uninstall script and rm must both run; calls: %q", f.host.Calls)
 	}
 }
@@ -703,7 +710,7 @@ func TestDestroy_LonghornUninstallFails(t *testing.T) {
 			if !errors.Is(run.err, boom) {
 				t.Errorf("Destroy error %v does not wrap the Longhorn error", run.err)
 			}
-			if got := run.ranScript(f.host.FakeRunner) && ranRemoveData(f.host.FakeRunner); got != tt.force {
+			if got := ranScript(f.host.FakeRunner) && ranRemoveData(f.host.FakeRunner); got != tt.force {
 				t.Errorf("uninstall script and rm ran = %t, want %t; calls: %q", got, tt.force, f.host.Calls)
 			}
 		})
@@ -739,7 +746,7 @@ func TestDestroy_DryRun(t *testing.T) {
 	if run.longhornCalls != 0 {
 		t.Errorf("longhornUninstall called %d times, want 0", run.longhornCalls)
 	}
-	if run.ranScript(f.host.FakeRunner) || f.host.Ran("rm ") || f.host.Ran("uninstall") {
+	if ranScript(f.host.FakeRunner) || f.host.Ran("rm ") || f.host.Ran("uninstall") {
 		t.Errorf("dry run modified the host; calls: %q", f.host.Calls)
 	}
 	if f.host.closed != 1 {
@@ -791,5 +798,57 @@ func TestDestroy_InvalidConfig(t *testing.T) {
 	}
 	if f.dials != 0 {
 		t.Errorf("dialled %d times, want 0", f.dials)
+	}
+}
+
+func TestDestroy_UnreadableKubeconfig(t *testing.T) {
+	f := newFakes(destroyHost(t, false))
+	f.host.Files[rke2host.KubeconfigPath] = []byte("apiVersion: [unterminated")
+	updates := make(chan status.Update, 100)
+	ctx := status.WithChannel(context.Background(), updates)
+
+	p := f.provider()
+	p.apiReachable = func(context.Context, []byte) bool { return true }
+	longhornCalls := 0
+	p.longhornUninstall = func(context.Context, []byte) error {
+		longhornCalls++
+		return nil
+	}
+	if err := p.Destroy(ctx, testProject, clusterConfig(rke2Block()), cluster.DestroyOptions{}); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	if longhornCalls != 0 {
+		t.Errorf("longhornUninstall called %d times, want 0", longhornCalls)
+	}
+	if !ranScript(f.host.FakeRunner) || !ranRemoveData(f.host.FakeRunner) {
+		t.Errorf("uninstall script and rm must both run; calls: %q", f.host.Calls)
+	}
+	close(updates)
+	warned := false
+	for u := range updates {
+		if u.Level == status.LevelWarning && strings.Contains(u.Message, "skipping Longhorn uninstall") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Error("no warning status was sent about skipping the Longhorn uninstall")
+	}
+}
+
+func TestDestroy_LonghornDisabledSkipsKubeconfig(t *testing.T) {
+	f := newFakes(destroyHost(t, true))
+	block := rke2Block(func(m map[string]any) {
+		m["longhorn"] = map[string]any{"enabled": false}
+		m["storage_class"] = "local-path"
+	})
+	if run := runDestroy(f, true, nil, block, cluster.DestroyOptions{}); run.err != nil {
+		t.Fatalf("Destroy: %v", run.err)
+	}
+	if len(f.host.reads) != 0 {
+		t.Errorf("Destroy read %q, want no file reads", f.host.reads)
+	}
+	if f.host.Ran(rke2host.KubeconfigPath) {
+		t.Errorf("Destroy ran a script touching the kubeconfig; calls: %q", f.host.Calls)
 	}
 }
