@@ -77,7 +77,13 @@ func waitNodesReady(ctx context.Context, kubeconfig []byte) error {
 		attribute.Int("nodes_not_ready", len(notReady)),
 	)
 	if err != nil {
-		err = fmt.Errorf("nodes not Ready within %s: %w", nodeReadyTimeout, err)
+		if ctx.Err() != nil {
+			// The caller's deadline or cancellation ended the wait, not
+			// nodeReadyTimeout.
+			err = fmt.Errorf("nodes not Ready before the wait was cut short: %w", context.Cause(ctx))
+		} else {
+			err = fmt.Errorf("nodes not Ready within %s: %w", nodeReadyTimeout, err)
+		}
 		switch {
 		case lastErr != nil:
 			err = fmt.Errorf("%w (last node list error: %v)", err, lastErr)
@@ -104,29 +110,28 @@ func nodeIsReady(n corev1.Node) bool {
 }
 
 // apiAnswers reports whether the cluster's API server returns its version
-// within apiAnswerTimeout.
+// within apiAnswerTimeout, or before ctx ends if that is sooner.
 func apiAnswers(ctx context.Context, kubeconfig []byte) bool {
 	tracer := otel.Tracer("nebari-infrastructure-core")
 	ctx, span := tracer.Start(ctx, "rke2.apiAnswers")
 	defer span.End()
 
-	// ServerVersion takes no context, so the limit is set on the client.
-	if ctx.Err() != nil {
-		span.RecordError(ctx.Err())
-		return false
-	}
+	ctx, cancel := context.WithTimeout(ctx, apiAnswerTimeout)
+	defer cancel()
+
 	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
 		span.RecordError(err)
 		return false
 	}
-	restConfig.Timeout = apiAnswerTimeout
 	client, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
 		span.RecordError(err)
 		return false
 	}
-	if _, err := client.ServerVersion(); err != nil {
+	// ServerVersion takes no context, so the same request is made here with
+	// one, which ends it when ctx does.
+	if err := client.RESTClient().Get().AbsPath("/version").Do(ctx).Error(); err != nil {
 		span.RecordError(err)
 		span.SetAttributes(attribute.Bool("answered", false))
 		return false
