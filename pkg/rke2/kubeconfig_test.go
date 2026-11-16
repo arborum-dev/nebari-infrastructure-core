@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"strings"
 	"testing"
 
 	"k8s.io/client-go/tools/clientcmd"
@@ -59,6 +60,9 @@ func TestFetchKubeconfig(t *testing.T) {
 				}
 				if tt.wantNoFile && !errors.Is(err, fs.ErrNotExist) {
 					t.Errorf("error %v does not satisfy fs.ErrNotExist", err)
+				}
+				if tt.wantNoFile && strings.Count(err.Error(), rke2.KubeconfigPath) != 1 {
+					t.Errorf("error %q should name %s exactly once", err, rke2.KubeconfigPath)
 				}
 				return
 			}

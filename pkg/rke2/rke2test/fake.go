@@ -16,10 +16,11 @@ type Response struct {
 
 // FakeRunner is an in-memory rke2.Runner. It never touches a host.
 type FakeRunner struct {
-	Files     map[string][]byte // backs ReadFile and WriteFile
-	Responses []Response        // first whose Match is contained in the script wins; no match returns "", nil
-	Calls     []string          // every script passed to Run, in order
-	Writes    []string          // every path passed to WriteFile, in order
+	Files     map[string][]byte      // backs ReadFile and WriteFile
+	Modes     map[string]fs.FileMode // the mode of the last WriteFile to each path
+	Responses []Response             // first whose Match is contained in the script wins; no match returns "", nil
+	Calls     []string               // every script passed to Run, in order
+	Writes    []string               // every path passed to WriteFile, in order
 }
 
 // Run records script and returns the first matching Response.
@@ -42,12 +43,16 @@ func (f *FakeRunner) ReadFile(_ context.Context, path string) ([]byte, error) {
 	return append([]byte(nil), data...), nil
 }
 
-// WriteFile stores a copy of data at path and records the write.
-func (f *FakeRunner) WriteFile(_ context.Context, path string, data []byte, _ fs.FileMode) error {
+// WriteFile stores a copy of data at path and records the write and its mode.
+func (f *FakeRunner) WriteFile(_ context.Context, path string, data []byte, mode fs.FileMode) error {
 	if f.Files == nil {
 		f.Files = map[string][]byte{}
 	}
+	if f.Modes == nil {
+		f.Modes = map[string]fs.FileMode{}
+	}
 	f.Files[path] = append([]byte(nil), data...)
+	f.Modes[path] = mode
 	f.Writes = append(f.Writes, path)
 	return nil
 }

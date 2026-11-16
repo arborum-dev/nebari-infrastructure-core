@@ -12,10 +12,19 @@ import (
 
 // Options is the desired state of the RKE2 server.
 type Options struct {
-	Version          string
+	// Version is the exact RKE2 release tag to run, such as v1.37.2+rke2r1.
+	// There is no "latest", and a downgrade is refused.
+	Version string
+	// APIServerAddress is the address clients use to reach the Kubernetes API.
+	// It is always the first tls-san entry in the rendered config.
 	APIServerAddress string
-	StartOnBoot      bool
-	ExtraConfig      map[string]any
+	// StartOnBoot enables the service at boot when true and disables it when
+	// false.
+	StartOnBoot bool
+	// ExtraConfig holds extra keys for config.yaml. A key here replaces the
+	// provider default of the same name, except tls-san: its entries (a
+	// string or a list of strings) are appended after APIServerAddress.
+	ExtraConfig map[string]any
 }
 
 // State is what Inspect found on the host.
@@ -28,14 +37,14 @@ type State struct {
 
 // Plan is the set of actions that bring a host to the desired state.
 type Plan struct {
-	WriteConfig bool
+	WriteConfig bool   // write Config to ConfigPath with mode 0600
 	Config      []byte // rendered config; set whenever WriteConfig is true
 	Install     bool   // run the installer: fresh install or upgrade
 	Version     string // release tag to install; set whenever Install is true
-	Enable      bool
-	Disable     bool
-	Start       bool
-	Restart     bool
+	Enable      bool   // enable ServiceName at boot
+	Disable     bool   // disable ServiceName at boot
+	Start       bool   // start ServiceName, which is not running
+	Restart     bool   // restart the running ServiceName to pick up a new binary or config
 }
 
 // Empty reports whether the plan does nothing.
@@ -50,7 +59,7 @@ func (p Plan) Describe() []string {
 		lines = append(lines, "write "+ConfigPath)
 	}
 	if p.Install {
-		lines = append(lines, "install RKE2")
+		lines = append(lines, "install RKE2 "+p.Version)
 	}
 	if p.Enable {
 		lines = append(lines, "enable "+ServiceName+" at boot")
@@ -81,7 +90,7 @@ func (OnlineInstaller) Install(ctx context.Context, r Runner, version string) er
 	script := `tmp=$(mktemp) && curl -sfL -o "$tmp" https://get.rke2.io && INSTALL_RKE2_VERSION=` +
 		shellQuote(version) + ` sh "$tmp"; rc=$?; rm -f "$tmp"; exit $rc`
 	if _, err := r.Run(ctx, script); err != nil {
-		return fmt.Errorf("install RKE2 %s: %w", version, err)
+		return fmt.Errorf("run the install script from https://get.rke2.io: %w", err)
 	}
 	return nil
 }
@@ -187,7 +196,12 @@ func Inspect(ctx context.Context, r Runner) (State, error) {
 	if err != nil {
 		return State{}, fmt.Errorf("read service state: %w", err)
 	}
-	s.ServiceActive = strings.TrimSpace(active) == "active"
+	// RKE2 is a notify service that stays "activating" until it is up, so a
+	// service starting or reloading counts as running.
+	switch strings.TrimSpace(active) {
+	case "active", "activating", "reloading":
+		s.ServiceActive = true
+	}
 
 	enabled, err := r.Run(ctx, "systemctl is-enabled "+ServiceName+" 2>/dev/null || true")
 	if err != nil {
@@ -201,7 +215,7 @@ func Inspect(ctx context.Context, r Runner) (State, error) {
 		s.Config = cfg
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		return State{}, fmt.Errorf("read %s: %w", ConfigPath, err)
+		return State{}, fmt.Errorf("read RKE2 config: %w", err)
 	}
 	return s, nil
 }
@@ -262,11 +276,18 @@ func PlanInstall(s State, o Options) (Plan, error) {
 }
 
 // Apply carries out p: write config, install, enable or disable, then
-// restart or start. An empty plan makes no calls.
+// restart or start. An empty plan makes no calls. A plan that installs an
+// empty or invalid Version is rejected before any call: the install script
+// would read an empty version as "latest".
 func Apply(ctx context.Context, r Runner, inst Installer, p Plan) error {
+	if p.Install {
+		if _, err := ParseVersion(p.Version); err != nil {
+			return fmt.Errorf("plan installs RKE2: %w", err)
+		}
+	}
 	if p.WriteConfig {
 		if err := r.WriteFile(ctx, ConfigPath, p.Config, 0o600); err != nil {
-			return fmt.Errorf("write %s: %w", ConfigPath, err)
+			return fmt.Errorf("write RKE2 config: %w", err)
 		}
 	}
 	if p.Install {
@@ -274,7 +295,7 @@ func Apply(ctx context.Context, r Runner, inst Installer, p Plan) error {
 			return errors.New("plan requires an install but no installer was provided")
 		}
 		if err := inst.Install(ctx, r, p.Version); err != nil {
-			return err
+			return fmt.Errorf("install RKE2 %s: %w", p.Version, err)
 		}
 		// Trust the binary, not the installer's exit status, before touching
 		// the service: restarting an old binary would hide a failed upgrade.

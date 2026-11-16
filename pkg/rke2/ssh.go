@@ -27,11 +27,14 @@ var dialTimeout = 30 * time.Second
 
 // SSHOptions configures an SSH connection to the target host.
 type SSHOptions struct {
-	Host           string
-	Port           int
+	Host string // hostname or IP address to connect to
+	Port int    // TCP port; 0 means 22
+	// User is the login user. A user other than root runs every command
+	// through `sudo -n`, so it needs passwordless sudo; a password prompt
+	// fails the command instead of waiting.
 	User           string
-	PrivateKeyPath string
-	KnownHostsPath string
+	PrivateKeyPath string // private key for public-key authentication; must not need a passphrase
+	KnownHostsPath string // known_hosts file that must already hold the host's key
 	HostKeyAlias   string // when set, looked up in known_hosts instead of host:port
 }
 
@@ -40,8 +43,12 @@ type sshRunner struct {
 	sudo   bool
 }
 
-// Dial connects to the host with public-key authentication. The host key must
-// already be present in KnownHostsPath; it is never added automatically.
+// Dial connects to the host with public-key authentication and returns a
+// Runner that executes commands as root over that connection. The host key
+// must already be present in KnownHostsPath; it is never added automatically,
+// and an unknown or changed key refuses the connection. ctx bounds only the
+// connect and handshake, which also time out on their own; the caller must
+// Close the returned Runner.
 func Dial(ctx context.Context, opts SSHOptions) (Runner, error) {
 	keyPEM, err := os.ReadFile(opts.PrivateKeyPath)
 	if err != nil {

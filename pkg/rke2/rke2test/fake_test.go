@@ -32,6 +32,9 @@ func TestFakeRunner_WriteThenRead(t *testing.T) {
 	if len(f.Writes) != 1 || f.Writes[0] != "/a" {
 		t.Fatalf("Writes = %v", f.Writes)
 	}
+	if got := f.Modes["/a"]; got != 0o600 {
+		t.Errorf("Modes[/a] = %o, want 600", got)
+	}
 }
 
 func TestFakeRunner_ResponsesMatchInOrder(t *testing.T) {

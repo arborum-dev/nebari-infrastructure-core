@@ -21,7 +21,7 @@ func FetchKubeconfig(ctx context.Context, r Runner, apiServerAddress string) ([]
 	}
 	raw, err := r.ReadFile(ctx, KubeconfigPath)
 	if err != nil {
-		return nil, fmt.Errorf("read kubeconfig %s: %w", KubeconfigPath, err)
+		return nil, fmt.Errorf("read kubeconfig: %w", err)
 	}
 	cfg, err := clientcmd.Load(raw)
 	if err != nil {

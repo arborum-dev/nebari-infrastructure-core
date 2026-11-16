@@ -17,7 +17,8 @@ const (
 	ServiceName = "rke2-server.service"
 )
 
-// Runner executes work as root on the target host.
+// Runner executes work as root on the target host. Errors from ReadFile and
+// WriteFile name the path, so callers need not repeat it.
 type Runner interface {
 	// Run executes script with `sh -c`. A non-zero exit returns *ExitError.
 	Run(ctx context.Context, script string) (stdout string, err error)
@@ -25,6 +26,8 @@ type Runner interface {
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	// WriteFile creates parent directories and replaces path atomically with the given mode.
 	WriteFile(ctx context.Context, path string, data []byte, mode fs.FileMode) error
+	// Close releases the connection to the host. The Runner must not be used
+	// afterwards.
 	Close() error
 }
 

@@ -106,6 +106,12 @@ func TestPlanInstall(t *testing.T) {
 			want:  Plan{Enable: true},
 		},
 		{
+			name:  "colima steady state: running, not started at boot",
+			state: State{InstalledVersion: testV1, Config: cfg, ServiceActive: true},
+			opts:  opts(testV1, false),
+			want:  Plan{},
+		},
+		{
 			name:    "not installed but service active",
 			state:   State{ServiceActive: true},
 			opts:    opts(testV1, true),
@@ -192,6 +198,13 @@ func TestPlanDescribe(t *testing.T) {
 	}
 }
 
+func TestPlanDescribeNamesVersion(t *testing.T) {
+	got := Plan{Install: true, Version: testV2, Restart: true}.Describe()
+	if len(got) == 0 || got[0] != "install RKE2 "+testV2 {
+		t.Errorf("Describe() = %q, want it to start with %q", got, "install RKE2 "+testV2)
+	}
+}
+
 func TestInspect(t *testing.T) {
 	cfg := []byte("tls-san:\n- 10.0.0.5\n")
 	tests := []struct {
@@ -217,6 +230,31 @@ func TestInspect(t *testing.T) {
 				{Match: "--version", Stdout: "rke2 version " + testV1 + " (abc123)\n"},
 				{Match: "is-active", Stdout: "inactive\n"},
 				{Match: "is-enabled", Stdout: "disabled\n"},
+			},
+			want: State{InstalledVersion: testV1},
+		},
+		{
+			name: "starting up counts as active",
+			responses: []rke2test.Response{
+				{Match: "--version", Stdout: "rke2 version " + testV1 + " (abc123)\n"},
+				{Match: "is-active", Stdout: "activating\n"},
+				{Match: "is-enabled", Stdout: "enabled\n"},
+			},
+			want: State{InstalledVersion: testV1, ServiceActive: true, ServiceEnabled: true},
+		},
+		{
+			name: "reloading counts as active",
+			responses: []rke2test.Response{
+				{Match: "--version", Stdout: "rke2 version " + testV1 + " (abc123)\n"},
+				{Match: "is-active", Stdout: "reloading\n"},
+			},
+			want: State{InstalledVersion: testV1, ServiceActive: true},
+		},
+		{
+			name: "failed counts as stopped",
+			responses: []rke2test.Response{
+				{Match: "--version", Stdout: "rke2 version " + testV1 + " (abc123)\n"},
+				{Match: "is-active", Stdout: "failed\n"},
 			},
 			want: State{InstalledVersion: testV1},
 		},
@@ -393,6 +431,9 @@ func TestApply(t *testing.T) {
 			if tt.wantWrites != nil && !bytes.Equal(f.Files[ConfigPath], tt.plan.Config) {
 				t.Errorf("config written = %q, want %q", f.Files[ConfigPath], tt.plan.Config)
 			}
+			if tt.wantWrites != nil && f.Modes[ConfigPath] != 0o600 {
+				t.Errorf("config written with mode %o, want 600", f.Modes[ConfigPath])
+			}
 			if got := len(inst.versions) > 0; got != tt.wantInstalled {
 				t.Errorf("installer called = %v, want %v", got, tt.wantInstalled)
 			}
@@ -444,10 +485,61 @@ func TestApplyInstallerError(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("Apply error = %v, want %v", err, boom)
 	}
+	if !strings.HasPrefix(err.Error(), "install RKE2 "+testV1+": ") {
+		t.Errorf("Apply error = %q, want it to start with %q", err, "install RKE2 "+testV1+": ")
+	}
 	if len(f.Calls) != 0 {
 		t.Errorf("ran %q after the installer failed", f.Calls)
 	}
 }
+
+func TestApplyOnlineInstallerErrorWording(t *testing.T) {
+	failed := &ExitError{Code: 6, Stderr: "curl: (6) Could not resolve host: get.rke2.io"}
+	f := &rke2test.FakeRunner{Responses: []rke2test.Response{{Match: "get.rke2.io", Err: failed}}}
+	err := Apply(context.Background(), f, OnlineInstaller{}, Plan{Install: true, Version: testV1, Start: true})
+	var exit *ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("Apply error = %v, want an *ExitError inside", err)
+	}
+	if n := strings.Count(err.Error(), testV1); n != 1 {
+		t.Errorf("Apply error = %q names the version %d times, want once", err, n)
+	}
+}
+
+func TestApplyRejectsInvalidVersion(t *testing.T) {
+	for _, version := range []string{"", "latest", "1.37.2"} {
+		t.Run(version, func(t *testing.T) {
+			f := &rke2test.FakeRunner{}
+			inst := &recordingInstaller{f: f}
+			plan := Plan{WriteConfig: true, Config: []byte("a: b\n"), Install: true, Version: version, Enable: true, Start: true}
+			if err := Apply(context.Background(), f, inst, plan); err == nil {
+				t.Fatal("Apply returned nil, want an error")
+			}
+			if len(f.Calls) != 0 || len(f.Writes) != 0 || len(inst.versions) != 0 {
+				t.Errorf("Apply acted before rejecting the plan: calls %q writes %q installs %q", f.Calls, f.Writes, inst.versions)
+			}
+		})
+	}
+}
+
+func TestApplyWriteErrorNamesPathOnce(t *testing.T) {
+	denied := &fs.PathError{Op: "write", Path: ConfigPath, Err: fs.ErrPermission}
+	w := &errWriter{err: denied}
+	err := Apply(context.Background(), w, nil, Plan{WriteConfig: true, Config: []byte("a: b\n")})
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("Apply error = %v, want permission error", err)
+	}
+	if n := strings.Count(err.Error(), ConfigPath); n != 1 {
+		t.Errorf("Apply error = %q names %s %d times, want once", err, ConfigPath, n)
+	}
+}
+
+type errWriter struct {
+	rke2test.FakeRunner
+	err error
+}
+
+func (e *errWriter) WriteFile(context.Context, string, []byte, fs.FileMode) error { return e.err }
 
 func TestApplyMissingInstaller(t *testing.T) {
 	f := &rke2test.FakeRunner{}
@@ -548,8 +640,12 @@ func TestApplyVerifiesInstalledVersion(t *testing.T) {
 func TestInspectReadFileError(t *testing.T) {
 	denied := &fs.PathError{Op: "read", Path: ConfigPath, Err: fs.ErrPermission}
 	r := &errReader{err: denied}
-	if _, err := Inspect(context.Background(), r); !errors.Is(err, fs.ErrPermission) {
+	_, err := Inspect(context.Background(), r)
+	if !errors.Is(err, fs.ErrPermission) {
 		t.Fatalf("Inspect error = %v, want permission error", err)
+	}
+	if n := strings.Count(err.Error(), ConfigPath); n != 1 {
+		t.Errorf("Inspect error = %q names %s %d times, want once", err, ConfigPath, n)
 	}
 }
 
