@@ -9,19 +9,26 @@ import (
 )
 
 func TestRenderConfig(t *testing.T) {
+	gw := []any{"rke2-gateway-api-crd"}
 	tests := []struct {
 		name    string
 		extra   map[string]any
 		want    map[string]any
 		wantErr bool
 	}{
-		{"defaults", nil, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}}, false},
-		{"extra key", map[string]any{"profile": "cis"}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}, "profile": "cis"}, false},
-		{"override a default", map[string]any{"enable-servicelb": false}, map[string]any{"ingress-controller": "none", "enable-servicelb": false, "tls-san": []any{"10.0.0.5"}}, false},
-		{"tls-san list", map[string]any{"tls-san": []any{"a.example"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5", "a.example"}}, false},
-		{"tls-san string list", map[string]any{"tls-san": []string{"a.example"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5", "a.example"}}, false},
-		{"tls-san string", map[string]any{"tls-san": "a.example"}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5", "a.example"}}, false},
-		{"tls-san duplicate", map[string]any{"tls-san": []any{"10.0.0.5"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}}, false},
+		{"defaults", nil, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}, "disable": gw}, false},
+		{"extra key", map[string]any{"profile": "cis"}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}, "disable": gw, "profile": "cis"}, false},
+		{"override a default", map[string]any{"enable-servicelb": false}, map[string]any{"ingress-controller": "none", "enable-servicelb": false, "tls-san": []any{"10.0.0.5"}, "disable": gw}, false},
+		{"tls-san list", map[string]any{"tls-san": []any{"a.example"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5", "a.example"}, "disable": gw}, false},
+		{"tls-san string list", map[string]any{"tls-san": []string{"a.example"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5", "a.example"}, "disable": gw}, false},
+		{"tls-san string", map[string]any{"tls-san": "a.example"}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5", "a.example"}, "disable": gw}, false},
+		{"tls-san duplicate", map[string]any{"tls-san": []any{"10.0.0.5"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}, "disable": gw}, false},
+		{"disable string", map[string]any{"disable": "rke2-metrics-server"}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}, "disable": []any{"rke2-gateway-api-crd", "rke2-metrics-server"}}, false},
+		{"disable list", map[string]any{"disable": []any{"rke2-metrics-server", "rke2-coredns"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}, "disable": []any{"rke2-gateway-api-crd", "rke2-metrics-server", "rke2-coredns"}}, false},
+		{"disable string list", map[string]any{"disable": []string{"rke2-metrics-server"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}, "disable": []any{"rke2-gateway-api-crd", "rke2-metrics-server"}}, false},
+		{"disable duplicate", map[string]any{"disable": []any{"rke2-metrics-server", "rke2-gateway-api-crd", "rke2-metrics-server"}}, map[string]any{"ingress-controller": "none", "enable-servicelb": true, "tls-san": []any{"10.0.0.5"}, "disable": []any{"rke2-gateway-api-crd", "rke2-metrics-server"}}, false},
+		{"disable wrong type", map[string]any{"disable": 5}, nil, true},
+		{"disable wrong element type", map[string]any{"disable": []any{5}}, nil, true},
 		{"tls-san wrong type", map[string]any{"tls-san": 5}, nil, true},
 		{"tls-san wrong element type", map[string]any{"tls-san": []any{5}}, nil, true},
 	}
