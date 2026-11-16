@@ -7,19 +7,17 @@ import (
 	"strings"
 )
 
-// uninstallScripts are the places RKE2 installs its uninstall script: the
-// tarball layout first, then the RPM layout.
-var uninstallScripts = []string{
-	"/usr/local/bin/rke2-uninstall.sh",
-	"/usr/bin/rke2-uninstall.sh",
-}
+// uninstallScripts are the places RKE2 installs its uninstall script, one per
+// install prefix.
+var uninstallScripts = installedPaths("rke2-uninstall.sh")
 
 // minDataDirDepth is the fewest path segments a data directory may have, so
 // that "/" or "/var" can never be removed.
 const minDataDirDepth = 3
 
 // Uninstall runs RKE2's uninstall script when present, then removes each of
-// dataDirs. A host with nothing to remove is a success.
+// dataDirs. A host with nothing to remove is a success. An rke2 binary with
+// no uninstall script beside it is an error, and nothing is removed.
 func Uninstall(ctx context.Context, r Runner, dataDirs []string) error {
 	for _, dir := range dataDirs {
 		if err := validateDataDir(dir); err != nil {
@@ -34,6 +32,16 @@ func Uninstall(ctx context.Context, r Runner, dataDirs []string) error {
 	if script != "" {
 		if _, err := r.Run(ctx, singleQuote(script)); err != nil {
 			return fmt.Errorf("run %s: %w", script, err)
+		}
+	} else {
+		v, err := installedVersion(ctx, r)
+		if err != nil {
+			return fmt.Errorf("no uninstall script found at %s, and checking for an rke2 binary failed: %w",
+				strings.Join(uninstallScripts, ", "), err)
+		}
+		if v != "" {
+			return fmt.Errorf("RKE2 %s is installed but no uninstall script was found at %s; refusing to continue",
+				v, strings.Join(uninstallScripts, ", "))
 		}
 	}
 

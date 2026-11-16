@@ -559,3 +559,17 @@ type errReader struct {
 }
 
 func (e *errReader) ReadFile(context.Context, string) ([]byte, error) { return nil, e.err }
+
+func TestInstallPathsSharePrefixes(t *testing.T) {
+	if len(binaryPaths) != len(installPrefixes) || len(uninstallScripts) != len(installPrefixes) {
+		t.Fatalf("binaryPaths %q and uninstallScripts %q must have one entry per prefix %q", binaryPaths, uninstallScripts, installPrefixes)
+	}
+	for i, prefix := range installPrefixes {
+		if want := prefix + "/bin/rke2"; binaryPaths[i] != want {
+			t.Errorf("binaryPaths[%d] = %q, want %q", i, binaryPaths[i], want)
+		}
+		if want := prefix + "/bin/rke2-uninstall.sh"; uninstallScripts[i] != want {
+			t.Errorf("uninstallScripts[%d] = %q, want %q", i, uninstallScripts[i], want)
+		}
+	}
+}

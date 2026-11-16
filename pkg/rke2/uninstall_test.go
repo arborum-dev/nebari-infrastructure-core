@@ -12,6 +12,7 @@ import (
 const (
 	localScript = "/usr/local/bin/rke2-uninstall.sh"
 	rpmScript   = "/usr/bin/rke2-uninstall.sh"
+	optScript   = "/opt/rke2/bin/rke2-uninstall.sh"
 	probeMatch  = "[ -x"
 	rmLonghorn  = "rm -rf -- '/var/lib/longhorn'"
 )
@@ -49,8 +50,24 @@ func TestUninstall(t *testing.T) {
 			wantRm:     true,
 		},
 		{
+			name:       "tarball under /opt/rke2",
+			responses:  []rke2test.Response{{Match: probeMatch, Stdout: optScript + "\n"}},
+			wantScript: optScript,
+			wantRm:     true,
+		},
+		{
 			name:   "never installed",
 			wantRm: true,
+		},
+		{
+			name:      "binary present but no uninstall script",
+			responses: []rke2test.Response{{Match: "--version", Stdout: "rke2 version v1.37.2+rke2r1 (abc123)\n"}},
+			wantErr:   true,
+		},
+		{
+			name:      "broken binary and no uninstall script",
+			responses: []rke2test.Response{{Match: "--version", Err: &rke2.ExitError{Code: 126, Stderr: "exec format error"}}},
+			wantErr:   true,
 		},
 		{
 			name: "script fails",
@@ -69,7 +86,7 @@ func TestUninstall(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
-			for _, s := range []string{localScript, rpmScript} {
+			for _, s := range []string{localScript, rpmScript, optScript} {
 				want := 0
 				if s == tt.wantScript {
 					want = 1
@@ -87,6 +104,18 @@ func TestUninstall(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUninstallProbesEveryPrefix(t *testing.T) {
+	r := &rke2test.FakeRunner{}
+	if err := rke2.Uninstall(context.Background(), r, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{localScript, rpmScript, optScript} {
+		if !r.Ran(s) {
+			t.Errorf("no probe looked for %s; calls: %q", s, r.Calls)
+		}
 	}
 }
 

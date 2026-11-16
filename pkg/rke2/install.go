@@ -134,9 +134,24 @@ func Check(ctx context.Context, r Runner) error {
 	return nil
 }
 
+// installPrefixes are where RKE2 can be installed: the tarball default, the
+// RPM layout, and the tarball fallback get.rke2.io uses when /usr/local is a
+// mount point or read-only. Every path the package probes is derived from
+// this list, so the binary and uninstall-script lookups cannot drift apart.
+var installPrefixes = []string{"/usr/local", "/usr", "/opt/rke2"}
+
+// installedPaths returns <prefix>/bin/<name> for every install prefix.
+func installedPaths(name string) []string {
+	paths := make([]string, len(installPrefixes))
+	for i, p := range installPrefixes {
+		paths[i] = p + "/bin/" + name
+	}
+	return paths
+}
+
 // binaryPaths are where the RKE2 install script puts the binary. The probe
 // uses absolute paths because sudo's secure_path may not include them.
-var binaryPaths = []string{"/usr/local/bin/rke2", "/usr/bin/rke2", "/opt/rke2/bin/rke2"}
+var binaryPaths = installedPaths("rke2")
 
 // versionProbe prints the version of the first binary found, and nothing (exit
 // 0) when there is none. A binary whose --version fails makes the script fail.
