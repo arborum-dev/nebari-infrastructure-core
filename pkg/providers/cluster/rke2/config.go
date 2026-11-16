@@ -97,7 +97,8 @@ type Settings struct {
 	// (/etc/rancher/rke2/config.yaml), such as a CIS profile, the CNI or
 	// kubelet arguments. A key here replaces the provider's default of the
 	// same name, except tls-san, which always also contains
-	// api_server_address.
+	// api_server_address, and disable, which always also contains
+	// rke2-gateway-api-crd.
 	Config map[string]any `yaml:"config,omitempty"`
 }
 
