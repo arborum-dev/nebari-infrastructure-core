@@ -1,0 +1,54 @@
+project_name: my-nebari-rke2
+domain: nebari.example.com
+
+# Single-node RKE2 cluster installed over SSH on a host you already have: a
+# VM, a bare-metal server or a cloud instance. NIC connects to the host,
+# installs RKE2 and deploys the foundational software.
+cluster:
+  rke2:
+    # Address to open the SSH connection to.
+    host: 203.0.113.10
+    # Required. An exact RKE2 release; there is no "latest".
+    version: v1.37.2+rke2r1
+    ssh:
+      # Root, or a user with passwordless sudo. Defaults to root.
+      user: root
+      # Defaults to 22.
+      port: 22
+      # Required. Private key used to authenticate; it must not need a passphrase.
+      # "~" is not expanded, so use an absolute path.
+      private_key_path: /home/me/.ssh/id_ed25519
+      # Must already hold the host key. Defaults to $HOME/.ssh/known_hosts.
+      known_hosts_path: /home/me/.ssh/known_hosts
+      # Optional. Name to look up in known_hosts when it differs from host.
+      host_key_alias: ""
+    # Address the returned kubeconfig points at, also added to RKE2's tls-san.
+    # Defaults to host.
+    api_server_address: ""
+    # Enable the RKE2 service at boot. Defaults to true.
+    start_on_boot: true
+    # Extra keys written to /etc/rancher/rke2/config.yaml. They replace the
+    # provider's defaults key by key, except tls-san, which always also
+    # contains api_server_address.
+    config: {}
+    # Longhorn is installed when this block is omitted. With one node the
+    # replica count defaults to 1.
+    longhorn:
+      replica_count: 1
+
+certificate:
+  type: selfsigned
+
+# GitOps repository configuration (required)
+# ArgoCD uses this repository to deploy Envoy Gateway, cert-manager, Keycloak, etc.
+repository:
+  existing:
+    url: "https://github.com/my-org/my-gitops-repo.git"  # with ssh, use git@github.com:my-org/my-gitops-repo.git
+    branch: main
+    path: "clusters/my-nebari-rke2"  # Optional subdirectory within the repository
+    auth:
+      token:
+        env: GIT_TOKEN  # environment variable containing a Git access token
+      # OR use an SSH key (required for Bitbucket, and use the git@ URL above):
+      # ssh:
+      #   env: GIT_SSH_PRIVATE_KEY

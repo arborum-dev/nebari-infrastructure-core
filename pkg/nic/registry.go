@@ -13,6 +13,7 @@ import (
 	clustergcp "github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/cluster/gcp"
 	clusterhetzner "github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/cluster/hetzner"
 	clusterlocal "github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/cluster/local"
+	clusterrke2 "github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/cluster/rke2"
 	dnscloudflare "github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/dns/cloudflare"
 	repositoryexisting "github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/repository/existing"
 	repositorylocal "github.com/nebari-dev/nebari-infrastructure-core/pkg/providers/repository/local"
@@ -70,6 +71,9 @@ func defaultRegistry(ctx context.Context) (*registry.Registry, error) {
 	}
 	if err := r.ClusterProviders.Register(ctx, clusterexisting.ProviderName, clusterexisting.NewProvider()); err != nil {
 		return nil, fmt.Errorf("register existing cluster provider: %w", err)
+	}
+	if err := r.ClusterProviders.Register(ctx, clusterrke2.ProviderName, clusterrke2.NewProvider()); err != nil {
+		return nil, fmt.Errorf("register rke2 cluster provider: %w", err)
 	}
 
 	if err := r.DNSProviders.Register(ctx, dnscloudflare.ProviderName, dnscloudflare.NewProvider()); err != nil {

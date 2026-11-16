@@ -67,6 +67,7 @@ var providerDocMeta = map[string]struct{ title, desc string }{
 	"pkg/providers/cluster/hetzner":  {"Hetzner Provider Configuration", "Configuration options specific to Hetzner Cloud."},
 	"pkg/providers/cluster/local":    {"Local Provider Configuration", "Configuration options for local Kubernetes deployments."},
 	"pkg/providers/cluster/existing": {"Existing Cluster Configuration", "Configuration options for attaching to an existing Kubernetes cluster."},
+	"pkg/providers/cluster/rke2":     {"RKE2 Provider Configuration", "Configuration options for a single-node RKE2 cluster installed on an existing host over SSH."},
 	"pkg/providers/dns/cloudflare":   {"Cloudflare DNS Configuration", "Configuration options for Cloudflare DNS provider."},
 
 	"pkg/providers/repository/local":    {"Local GitOps Repository Configuration", "Configuration options for the NIC-managed local GitOps repository ArgoCD syncs from."},
