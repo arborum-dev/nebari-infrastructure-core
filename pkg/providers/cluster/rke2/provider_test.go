@@ -533,3 +533,263 @@ func TestSummary(t *testing.T) {
 		}
 	})
 }
+
+const quotedUninstallScript = "'/usr/local/bin/rke2-uninstall.sh'"
+
+// withUninstallScript makes the host report RKE2's uninstall script at
+// /usr/local/bin, as the probe in rke2.Uninstall looks for it.
+func withUninstallScript(h *rke2test.FakeRunner) *rke2test.FakeRunner {
+	h.Responses = append([]rke2test.Response{
+		{Match: "for p in", Stdout: "/usr/local/bin/rke2-uninstall.sh\n"},
+	}, h.Responses...)
+	return h
+}
+
+// destroyHost is a host with RKE2 installed and, when kubeconfig is true, the
+// kubeconfig in place. The uninstall script is present either way.
+func destroyHost(t *testing.T, kubeconfig bool) *rke2test.FakeRunner {
+	t.Helper()
+	h := withUninstallScript(rke2test.NewHost("Linux"))
+	h.SimulateInstalled(testVersion, true, true, renderedConfig(t))
+	if kubeconfig {
+		h.Files[rke2host.KubeconfigPath] = []byte(testKubeconfig)
+	}
+	return h
+}
+
+// destroyRun is what a Destroy left behind.
+type destroyRun struct {
+	err           error
+	longhornCalls int
+	// callsAtLonghorn is how many host scripts had run when longhornUninstall
+	// was called.
+	callsAtLonghorn int
+}
+
+func (r destroyRun) ranScript(h *rke2test.FakeRunner) bool {
+	for _, c := range h.Calls {
+		if c == quotedUninstallScript {
+			return true
+		}
+	}
+	return false
+}
+
+func ranRemoveData(h *rke2test.FakeRunner) bool {
+	return h.Ran("rm -rf -- ") && h.Ran(LonghornDataDir)
+}
+
+func runDestroy(f *fakes, reachable bool, longhornErr error, block map[string]any, opts cluster.DestroyOptions) destroyRun {
+	var run destroyRun
+	p := f.provider()
+	p.apiReachable = func(context.Context, []byte) bool { return reachable }
+	p.longhornUninstall = func(context.Context, []byte) error {
+		run.longhornCalls++
+		run.callsAtLonghorn = len(f.host.Calls)
+		return longhornErr
+	}
+	run.err = p.Destroy(context.Background(), testProject, clusterConfig(block), opts)
+	return run
+}
+
+func TestDestroy_RunningCluster(t *testing.T) {
+	f := newFakes(destroyHost(t, true))
+	run := runDestroy(f, true, nil, rke2Block(), cluster.DestroyOptions{})
+
+	if run.err != nil {
+		t.Fatalf("Destroy: %v", run.err)
+	}
+	if run.longhornCalls != 1 {
+		t.Fatalf("longhornUninstall called %d times, want 1", run.longhornCalls)
+	}
+	// Longhorn goes first: the script was not yet run, nor the data removed.
+	for _, c := range f.host.Calls[:run.callsAtLonghorn] {
+		if c == quotedUninstallScript || strings.HasPrefix(c, "rm -rf") {
+			t.Errorf("%q ran before longhornUninstall", c)
+		}
+	}
+	if !run.ranScript(f.host.FakeRunner) {
+		t.Error("RKE2 uninstall script did not run")
+	}
+	if !ranRemoveData(f.host.FakeRunner) {
+		t.Errorf("rm -rf -- %s did not run; calls: %q", LonghornDataDir, f.host.Calls)
+	}
+	last := f.host.Calls[len(f.host.Calls)-1]
+	if !strings.HasPrefix(last, "rm -rf -- ") || !strings.Contains(last, LonghornDataDir) {
+		t.Errorf("last call = %q, want the Longhorn data removal", last)
+	}
+	if f.host.closed != 1 {
+		t.Errorf("Close called %d times, want 1", f.host.closed)
+	}
+}
+
+func TestDestroy_StoppedCluster(t *testing.T) {
+	f := newFakes(destroyHost(t, true))
+	run := runDestroy(f, false, nil, rke2Block(), cluster.DestroyOptions{})
+
+	if run.err != nil {
+		t.Fatalf("Destroy: %v", run.err)
+	}
+	if run.longhornCalls != 0 {
+		t.Errorf("longhornUninstall called %d times, want 0", run.longhornCalls)
+	}
+	if got := ranServiceChange(f.host.FakeRunner); len(got) != 0 {
+		t.Errorf("Destroy changed the service: %v", got)
+	}
+	if !run.ranScript(f.host.FakeRunner) || !ranRemoveData(f.host.FakeRunner) {
+		t.Errorf("uninstall script and rm must both run; calls: %q", f.host.Calls)
+	}
+}
+
+func TestDestroy_NeverInstalled(t *testing.T) {
+	f := newFakes(rke2test.NewHost("Linux"))
+	run := runDestroy(f, true, nil, rke2Block(), cluster.DestroyOptions{})
+
+	if run.err != nil {
+		t.Fatalf("Destroy: %v", run.err)
+	}
+	if run.longhornCalls != 0 {
+		t.Errorf("longhornUninstall called %d times, want 0", run.longhornCalls)
+	}
+	if !ranRemoveData(f.host.FakeRunner) {
+		t.Errorf("rm -rf -- %s did not run; calls: %q", LonghornDataDir, f.host.Calls)
+	}
+}
+
+func TestDestroy_AlreadyDestroyed(t *testing.T) {
+	f := newFakes(rke2test.NewHost("Linux"))
+	p := f.provider()
+	for i := 0; i < 2; i++ {
+		if err := p.Destroy(context.Background(), testProject, clusterConfig(rke2Block()), cluster.DestroyOptions{}); err != nil {
+			t.Fatalf("Destroy #%d: %v", i+1, err)
+		}
+	}
+}
+
+func TestDestroy_OnlyRemovesLonghornDataDir(t *testing.T) {
+	f := newFakes(destroyHost(t, true))
+	run := runDestroy(f, true, nil, rke2Block(), cluster.DestroyOptions{})
+	if run.err != nil {
+		t.Fatalf("Destroy: %v", run.err)
+	}
+	var removals []string
+	for _, c := range f.host.Calls {
+		if strings.Contains(c, "rm ") {
+			removals = append(removals, c)
+		}
+	}
+	if want := []string{"rm -rf -- '" + LonghornDataDir + "'"}; !reflect.DeepEqual(removals, want) {
+		t.Errorf("removals = %q, want %q", removals, want)
+	}
+}
+
+func TestDestroy_LonghornUninstallFails(t *testing.T) {
+	tests := []struct {
+		name  string
+		force bool
+	}{
+		{name: "without force"},
+		{name: "with force", force: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakes(destroyHost(t, true))
+			boom := errors.New("helm uninstall timed out")
+			run := runDestroy(f, true, boom, rke2Block(), cluster.DestroyOptions{Force: tt.force})
+
+			if run.err == nil || !strings.Contains(run.err.Error(), "failed to uninstall Longhorn") {
+				t.Fatalf("Destroy error = %v, want one containing %q", run.err, "failed to uninstall Longhorn")
+			}
+			if !errors.Is(run.err, boom) {
+				t.Errorf("Destroy error %v does not wrap the Longhorn error", run.err)
+			}
+			if got := run.ranScript(f.host.FakeRunner) && ranRemoveData(f.host.FakeRunner); got != tt.force {
+				t.Errorf("uninstall script and rm ran = %t, want %t; calls: %q", got, tt.force, f.host.Calls)
+			}
+		})
+	}
+}
+
+func TestDestroy_LonghornDisabled(t *testing.T) {
+	f := newFakes(destroyHost(t, true))
+	block := rke2Block(func(m map[string]any) {
+		m["longhorn"] = map[string]any{"enabled": false}
+		m["storage_class"] = "local-path"
+	})
+	run := runDestroy(f, true, nil, block, cluster.DestroyOptions{})
+
+	if run.err != nil {
+		t.Fatalf("Destroy: %v", run.err)
+	}
+	if run.longhornCalls != 0 {
+		t.Errorf("longhornUninstall called %d times, want 0", run.longhornCalls)
+	}
+	if !ranRemoveData(f.host.FakeRunner) {
+		t.Errorf("rm -rf -- %s did not run; calls: %q", LonghornDataDir, f.host.Calls)
+	}
+}
+
+func TestDestroy_DryRun(t *testing.T) {
+	f := newFakes(destroyHost(t, true))
+	run := runDestroy(f, true, nil, rke2Block(), cluster.DestroyOptions{DryRun: true})
+
+	if run.err != nil {
+		t.Fatalf("Destroy: %v", run.err)
+	}
+	if run.longhornCalls != 0 {
+		t.Errorf("longhornUninstall called %d times, want 0", run.longhornCalls)
+	}
+	if run.ranScript(f.host.FakeRunner) || f.host.Ran("rm ") || f.host.Ran("uninstall") {
+		t.Errorf("dry run modified the host; calls: %q", f.host.Calls)
+	}
+	if f.host.closed != 1 {
+		t.Errorf("Close called %d times, want 1", f.host.closed)
+	}
+}
+
+func TestDestroy_ClearsKubeconfigCache(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      cluster.DestroyOptions
+		reachable bool
+		lhErr     error
+		wantDials int // after GetKubeconfig, Destroy, GetKubeconfig
+	}{
+		{name: "success", wantDials: 3},
+		{name: "failure", reachable: true, lhErr: errors.New("boom"), wantDials: 3},
+		{name: "dry run keeps the cache", opts: cluster.DestroyOptions{DryRun: true}, wantDials: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakes(destroyHost(t, true))
+			p := f.provider()
+			p.apiReachable = func(context.Context, []byte) bool { return tt.reachable }
+			p.longhornUninstall = func(context.Context, []byte) error { return tt.lhErr }
+			ctx := context.Background()
+			cfg := clusterConfig(rke2Block())
+
+			if _, err := p.GetKubeconfig(ctx, testProject, cfg); err != nil {
+				t.Fatalf("GetKubeconfig: %v", err)
+			}
+			_ = p.Destroy(ctx, testProject, cfg, tt.opts)
+			if _, err := p.GetKubeconfig(ctx, testProject, cfg); err != nil {
+				t.Fatalf("second GetKubeconfig: %v", err)
+			}
+			if f.dials != tt.wantDials {
+				t.Errorf("dialled %d times, want %d", f.dials, tt.wantDials)
+			}
+		})
+	}
+}
+
+func TestDestroy_InvalidConfig(t *testing.T) {
+	f := newFakes(rke2test.NewHost("Linux"))
+	block := rke2Block(func(m map[string]any) { delete(m, "host") })
+	err := f.provider().Destroy(context.Background(), testProject, clusterConfig(block), cluster.DestroyOptions{})
+	if err == nil {
+		t.Fatal("Destroy accepted an invalid config")
+	}
+	if f.dials != 0 {
+		t.Errorf("dialled %d times, want 0", f.dials)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sync"
 
@@ -234,11 +235,116 @@ func (p *Provider) Deploy(ctx context.Context, projectName string, clusterConfig
 	return nil
 }
 
-// Destroy is not implemented yet.
-//
-// TODO(task 8): replace this placeholder with the RKE2 destroy path.
-func (p *Provider) Destroy(_ context.Context, _ string, _ *config.ClusterConfig, _ cluster.DestroyOptions) error {
-	return errors.New("rke2 provider: destroy is not implemented yet")
+// Destroy returns the host to a state with no RKE2 and no cluster data. It
+// uninstalls Longhorn first when the cluster is running, runs RKE2's own
+// uninstall script, and removes the Longhorn data directory, the only
+// directory it ever removes. A host that was never deployed, or is already
+// destroyed, succeeds. It never starts RKE2 to reach the API. If Longhorn
+// cannot be uninstalled it stops before touching the host, unless opts.Force
+// is set, in which case it carries on and returns that error at the end. On a
+// dry run it reports what would be removed and changes nothing.
+func (p *Provider) Destroy(ctx context.Context, projectName string, clusterConfig *config.ClusterConfig, opts cluster.DestroyOptions) error {
+	tracer := otel.Tracer("nebari-infrastructure-core")
+	ctx, span := tracer.Start(ctx, "rke2.Destroy")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("provider", ProviderName),
+		attribute.String("project_name", projectName),
+		attribute.Bool("dry_run", opts.DryRun),
+		attribute.Bool("force", opts.Force),
+	)
+
+	fail := func(err error) error {
+		span.RecordError(err)
+		return err
+	}
+
+	cfg, err := loadConfig(ctx, clusterConfig)
+	if err != nil {
+		return fail(err)
+	}
+	span.SetAttributes(attribute.String("host", cfg.Host))
+
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+
+	sshOpts, err := cfg.SSHOptions()
+	if err != nil {
+		return fail(err)
+	}
+
+	status.Send(ctx, status.NewUpdate(status.LevelInfo, fmt.Sprintf("Connecting to RKE2 host %s", cfg.Host)).
+		WithResource("provider").WithAction("destroy"))
+
+	r, err := p.dial(ctx, sshOpts)
+	if err != nil {
+		return fail(fmt.Errorf("connect to RKE2 host %s: %w", cfg.Host, err))
+	}
+	// A failed Close cannot undo or invalidate work already done on the host.
+	defer func() { _ = r.Close() }()
+
+	if opts.DryRun {
+		if cfg.LonghornEnabled() {
+			status.Send(ctx, status.NewUpdate(status.LevelInfo, "Dry run: would uninstall Longhorn if the cluster is running").
+				WithResource("provider").WithAction("destroy"))
+		}
+		status.Send(ctx, status.NewUpdate(status.LevelInfo, fmt.Sprintf("Dry run: would run RKE2's uninstall script on %s", cfg.Host)).
+			WithResource("provider").WithAction("destroy"))
+		status.Send(ctx, status.NewUpdate(status.LevelInfo, fmt.Sprintf("Dry run: would remove %s on %s", LonghornDataDir, cfg.Host)).
+			WithResource("provider").WithAction("destroy"))
+		return nil
+	}
+
+	// From here the host may change, so whatever was cached no longer holds.
+	defer p.forgetKubeconfig(projectName)
+
+	// Read the kubeconfig fresh: the cache may predate the host's last state.
+	var longhornErr error
+	kubeconfig, err := rke2host.FetchKubeconfig(ctx, r, cfg.apiServerAddress())
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		kubeconfig = nil
+	case err != nil:
+		return fail(fmt.Errorf("fetch kubeconfig from RKE2 host %s: %w", cfg.Host, err))
+	}
+
+	if kubeconfig != nil && cfg.LonghornEnabled() && p.apiReachable(ctx, kubeconfig) {
+		status.Send(ctx, status.NewUpdate(status.LevelProgress, "Uninstalling Longhorn").
+			WithResource("provider").WithAction("destroy"))
+		if err := p.longhornUninstall(ctx, kubeconfig); err != nil {
+			longhornErr = fmt.Errorf("failed to uninstall Longhorn: %w", err)
+			if !opts.Force {
+				return fail(longhornErr)
+			}
+			status.Send(ctx, status.NewUpdate(status.LevelWarning, longhornErr.Error()+"; continuing because of --force").
+				WithResource("provider").WithAction("destroy"))
+		}
+	}
+
+	status.Send(ctx, status.NewUpdate(status.LevelProgress, fmt.Sprintf("Uninstalling RKE2 and removing %s on %s", LonghornDataDir, cfg.Host)).
+		WithResource("provider").WithAction("destroy"))
+	uninstallErr := rke2host.Uninstall(ctx, r, []string{LonghornDataDir})
+	if uninstallErr != nil {
+		uninstallErr = fmt.Errorf("uninstall RKE2 on host %s: %w", cfg.Host, uninstallErr)
+	}
+
+	if err := errors.Join(longhornErr, uninstallErr); err != nil {
+		return fail(err)
+	}
+	status.Send(ctx, status.NewUpdate(status.LevelSuccess, fmt.Sprintf("RKE2 removed from %s", cfg.Host)).
+		WithResource("provider").WithAction("destroy"))
+	return nil
+}
+
+// forgetKubeconfig drops the project's cached kubeconfig.
+func (p *Provider) forgetKubeconfig(projectName string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.kubeconfigs, projectName)
 }
 
 // GetKubeconfig returns the cluster's admin kubeconfig, pointed at
