@@ -125,6 +125,12 @@ func Dial(ctx context.Context, opts SSHOptions) (Runner, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("ssh handshake with %s: %w", addr, ctxErr)
 		}
+		var neg *ssh.AlgorithmNegotiationError
+		if len(cfg.HostKeyAlgorithms) > 0 && errors.As(err, &neg) && neg.What == "host key" {
+			return nil, fmt.Errorf("host %s offers no host key of a type known_hosts file %s lists for it (%s); "+
+				"its host key may have changed, so refusing to connect: %w",
+				display, opts.KnownHostsPath, strings.Join(cfg.HostKeyAlgorithms, ", "), err)
+		}
 		return nil, fmt.Errorf("ssh handshake with %s: %w", addr, err)
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {

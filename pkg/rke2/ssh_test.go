@@ -521,3 +521,39 @@ func TestShellQuote(t *testing.T) {
 		})
 	}
 }
+
+func TestDial_NoCommonHostKeyType(t *testing.T) {
+	tests := []struct {
+		name  string
+		alias string
+	}{
+		{"by address", ""},
+		{"by alias", "lima-colima-rke2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := startServerWithKeys(t, okHandler, newECDSASigner(t)) // offers only ECDSA
+			entry, display := s.addr, s.addr
+			if tt.alias != "" {
+				entry, display = tt.alias, tt.alias
+			}
+			kh := knownHostsFile(t, newSigner(t).PublicKey(), entry) // lists only ed25519
+			opts := s.opts("root", kh)
+			opts.HostKeyAlias = tt.alias
+
+			_, err := Dial(context.Background(), opts)
+			if err == nil {
+				t.Fatal("Dial succeeded with no common host key type")
+			}
+			for _, want := range []string{display, kh, ssh.KeyAlgoED25519, "changed"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+			var neg *ssh.AlgorithmNegotiationError
+			if !errors.As(err, &neg) {
+				t.Errorf("error %v does not wrap *ssh.AlgorithmNegotiationError", err)
+			}
+		})
+	}
+}
