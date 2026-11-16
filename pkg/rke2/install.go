@@ -75,9 +75,11 @@ type Installer interface {
 // OnlineInstaller runs the upstream install script, which needs internet access.
 type OnlineInstaller struct{}
 
-// Install runs https://get.rke2.io pinned to version.
+// Install runs https://get.rke2.io pinned to version. The script is downloaded
+// to a file first: piped into `sh -`, a failed or empty download would exit 0.
 func (OnlineInstaller) Install(ctx context.Context, r Runner, version string) error {
-	script := "curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION=" + posixQuote(version) + " sh -"
+	script := `tmp=$(mktemp) && curl -sfL -o "$tmp" https://get.rke2.io && INSTALL_RKE2_VERSION=` +
+		posixQuote(version) + ` sh "$tmp"; rc=$?; rm -f "$tmp"; exit $rc`
 	if _, err := r.Run(ctx, script); err != nil {
 		return fmt.Errorf("install RKE2 %s: %w", version, err)
 	}
@@ -143,22 +145,33 @@ var versionProbe = "for b in " + strings.Join(binaryPaths, " ") +
 
 var versionOutput = regexp.MustCompile(`^rke2 version (\S+)`)
 
+// installedVersion returns the version the installed rke2 binary reports, or
+// "" when no binary is found.
+func installedVersion(ctx context.Context, r Runner) (string, error) {
+	out, err := r.Run(ctx, versionProbe)
+	if err != nil {
+		return "", fmt.Errorf("read RKE2 version: %w", err)
+	}
+	if out = strings.TrimSpace(out); out == "" {
+		return "", nil
+	}
+	m := versionOutput.FindStringSubmatch(strings.SplitN(out, "\n", 2)[0])
+	if m == nil {
+		return "", fmt.Errorf("unrecognised `rke2 --version` output %q", out)
+	}
+	return m[1], nil
+}
+
 // Inspect reads the current RKE2 state from the host. Absent things are
 // reported as zero values, not errors.
 func Inspect(ctx context.Context, r Runner) (State, error) {
 	var s State
 
-	out, err := r.Run(ctx, versionProbe)
+	v, err := installedVersion(ctx, r)
 	if err != nil {
-		return State{}, fmt.Errorf("read RKE2 version: %w", err)
+		return State{}, err
 	}
-	if out = strings.TrimSpace(out); out != "" {
-		m := versionOutput.FindStringSubmatch(strings.SplitN(out, "\n", 2)[0])
-		if m == nil {
-			return State{}, fmt.Errorf("unrecognised `rke2 --version` output %q", out)
-		}
-		s.InstalledVersion = m[1]
-	}
+	s.InstalledVersion = v
 
 	active, err := r.Run(ctx, "systemctl is-active "+ServiceName+" 2>/dev/null || true")
 	if err != nil {
@@ -253,6 +266,11 @@ func Apply(ctx context.Context, r Runner, inst Installer, p Plan) error {
 		if err := inst.Install(ctx, r, p.Version); err != nil {
 			return err
 		}
+		// Trust the binary, not the installer's exit status, before touching
+		// the service: restarting an old binary would hide a failed upgrade.
+		if err := verifyInstalled(ctx, r, p.Version); err != nil {
+			return fmt.Errorf("install RKE2 %s: %w", p.Version, err)
+		}
 	}
 	if p.Enable {
 		if err := systemctl(ctx, r, "enable"); err != nil {
@@ -273,6 +291,22 @@ func Apply(ctx context.Context, r Runner, inst Installer, p Plan) error {
 		if err := systemctl(ctx, r, "start"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// verifyInstalled returns an error unless the rke2 binary on the host reports
+// version.
+func verifyInstalled(ctx context.Context, r Runner, version string) error {
+	got, err := installedVersion(ctx, r)
+	if err != nil {
+		return err
+	}
+	if got == "" {
+		return fmt.Errorf("rke2 binary not found at %s after the installer ran", strings.Join(binaryPaths, ", "))
+	}
+	if got != version {
+		return fmt.Errorf("the host reports RKE2 %s after the installer ran", got)
 	}
 	return nil
 }

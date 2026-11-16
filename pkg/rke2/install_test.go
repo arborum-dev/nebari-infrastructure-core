@@ -316,18 +316,25 @@ func TestCheck(t *testing.T) {
 }
 
 // recordingInstaller notes how far the fake had got when Install was called.
+// Unless noop or err is set, it makes the fake's version probe report the
+// installed version afterwards, as a real install would.
 type recordingInstaller struct {
 	f          *rke2test.FakeRunner
 	versions   []string
 	writesSeen int
 	callsSeen  int
 	err        error
+	noop       bool // succeed without changing what the version probe reports
 }
 
 func (r *recordingInstaller) Install(_ context.Context, _ Runner, version string) error {
 	r.versions = append(r.versions, version)
 	r.writesSeen = len(r.f.Writes)
 	r.callsSeen = len(r.f.Calls)
+	if r.err == nil && !r.noop {
+		installed := rke2test.Response{Match: "--version", Stdout: "rke2 version " + version + " (abc123)\n"}
+		r.f.Responses = append([]rke2test.Response{installed}, r.f.Responses...)
+	}
 	return r.err
 }
 
@@ -346,7 +353,7 @@ func TestApply(t *testing.T) {
 			plan:          Plan{WriteConfig: true, Config: cfg, Install: true, Version: testV1, Enable: true, Start: true},
 			wantWrites:    []string{ConfigPath},
 			wantInstalled: true,
-			wantRan:       []string{"systemctl enable", "systemctl start"},
+			wantRan:       []string{"--version", "systemctl enable", "systemctl start"},
 			wantNotRan:    []string{"restart", "disable"},
 		},
 		{
@@ -363,7 +370,7 @@ func TestApply(t *testing.T) {
 			name:          "upgrade while running",
 			plan:          Plan{Install: true, Version: testV2, Restart: true},
 			wantInstalled: true,
-			wantRan:       []string{"systemctl restart"},
+			wantRan:       []string{"--version", "systemctl restart"},
 			wantNotRan:    []string{"systemctl start"},
 		},
 		{
@@ -423,8 +430,8 @@ func TestApplyOrder(t *testing.T) {
 	if inst.writesSeen != 1 || inst.callsSeen != 0 {
 		t.Errorf("installer saw %d writes and %d calls, want 1 and 0 (config first, then install, then systemctl)", inst.writesSeen, inst.callsSeen)
 	}
-	if len(f.Calls) != 2 {
-		t.Fatalf("Calls = %q, want enable then start", f.Calls)
+	if len(f.Calls) != 3 {
+		t.Fatalf("Calls = %q, want the version check, then enable, then start", f.Calls)
 	}
 }
 
@@ -467,10 +474,72 @@ func TestOnlineInstaller(t *testing.T) {
 			if len(f.Calls) != 1 {
 				t.Fatalf("Calls = %q, want one script", f.Calls)
 			}
-			for _, s := range []string{"https://get.rke2.io", tt.want} {
-				if !strings.Contains(f.Calls[0], s) {
-					t.Errorf("script %q does not contain %q", f.Calls[0], s)
+			script := f.Calls[0]
+			// The script is downloaded to a file and run from it, so a failed
+			// download fails the install instead of feeding `sh -` nothing.
+			for _, s := range []string{"https://get.rke2.io", tt.want, `-o "$tmp"`, `sh "$tmp"`, "exit $rc"} {
+				if !strings.Contains(script, s) {
+					t.Errorf("script %q does not contain %q", script, s)
 				}
+			}
+			for _, s := range []string{"|", "sh -"} {
+				if strings.Contains(script, s) {
+					t.Errorf("script %q pipes the download into a shell (contains %q)", script, s)
+				}
+			}
+		})
+	}
+}
+
+func TestOnlineInstallerError(t *testing.T) {
+	failed := &ExitError{Code: 22, Stderr: "curl: (22) The requested URL returned error: 404"}
+	f := &rke2test.FakeRunner{Responses: []rke2test.Response{{Match: "get.rke2.io", Err: failed}}}
+	err := (OnlineInstaller{}).Install(context.Background(), f, testV1)
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 22 {
+		t.Fatalf("Install error = %v, want the *ExitError", err)
+	}
+}
+
+func TestApplyVerifiesInstalledVersion(t *testing.T) {
+	oldVersion := rke2test.Response{Match: "--version", Stdout: "rke2 version " + testV1 + " (abc123)\n"}
+	tests := []struct {
+		name      string
+		responses []rke2test.Response
+		plan      Plan
+		wantErr   string
+	}{
+		{
+			name:      "upgrade left the old version",
+			responses: []rke2test.Response{oldVersion},
+			plan:      Plan{Install: true, Version: testV2, Restart: true},
+			wantErr:   testV1,
+		},
+		{
+			name:    "fresh install left no binary",
+			plan:    Plan{WriteConfig: true, Config: []byte("a: b\n"), Install: true, Version: testV1, Enable: true, Start: true},
+			wantErr: "not found",
+		},
+		{
+			name:      "version probe fails after install",
+			responses: []rke2test.Response{{Match: "--version", Err: &ExitError{Code: 126, Stderr: "exec format error"}}},
+			plan:      Plan{Install: true, Version: testV1, Start: true},
+			wantErr:   "exec format error",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &rke2test.FakeRunner{Responses: tt.responses}
+			inst := &recordingInstaller{f: f, noop: true}
+			err := Apply(context.Background(), f, inst, tt.plan)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), tt.plan.Version) {
+				t.Fatalf("Apply error = %v, want one naming %q and %q", err, tt.plan.Version, tt.wantErr)
+			}
+			if len(inst.versions) != 1 {
+				t.Errorf("installer called %d times, want 1", len(inst.versions))
+			}
+			if f.Ran("systemctl") {
+				t.Errorf("ran systemctl after a failed install: %q", f.Calls)
 			}
 		})
 	}
