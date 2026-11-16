@@ -79,16 +79,11 @@ type OnlineInstaller struct{}
 // to a file first: piped into `sh -`, a failed or empty download would exit 0.
 func (OnlineInstaller) Install(ctx context.Context, r Runner, version string) error {
 	script := `tmp=$(mktemp) && curl -sfL -o "$tmp" https://get.rke2.io && INSTALL_RKE2_VERSION=` +
-		posixQuote(version) + ` sh "$tmp"; rc=$?; rm -f "$tmp"; exit $rc`
+		shellQuote(version) + ` sh "$tmp"; rc=$?; rm -f "$tmp"; exit $rc`
 	if _, err := r.Run(ctx, script); err != nil {
 		return fmt.Errorf("install RKE2 %s: %w", version, err)
 	}
 	return nil
-}
-
-// posixQuote wraps s in POSIX single quotes.
-func posixQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Check verifies the host can run RKE2 and that commands run as root without

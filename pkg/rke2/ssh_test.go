@@ -498,3 +498,26 @@ func TestDial_ContextCancelDuringHandshake(t *testing.T) {
 		t.Fatal("Dial ignored context cancellation")
 	}
 }
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "/etc/rancher/rke2/config.yaml", `'/etc/rancher/rke2/config.yaml'`},
+		{"empty", "", `''`},
+		{"single quote", "it's", `'it'\''s'`},
+		{"only a quote", "'", `''\'''`},
+		{"command substitution", "$(rm -rf /)", `'$(rm -rf /)'`},
+		{"backticks and variables", "`id` $HOME", "'`id` $HOME'"},
+		{"newline", "a\nb", "'a\nb'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shellQuote(tt.in); got != tt.want {
+				t.Errorf("shellQuote(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

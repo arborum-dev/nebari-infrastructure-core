@@ -30,7 +30,7 @@ func Uninstall(ctx context.Context, r Runner, dataDirs []string) error {
 		return err
 	}
 	if script != "" {
-		if _, err := r.Run(ctx, singleQuote(script)); err != nil {
+		if _, err := r.Run(ctx, shellQuote(script)); err != nil {
 			return fmt.Errorf("run %s: %w", script, err)
 		}
 	} else {
@@ -46,7 +46,7 @@ func Uninstall(ctx context.Context, r Runner, dataDirs []string) error {
 	}
 
 	for _, dir := range dataDirs {
-		if _, err := r.Run(ctx, "rm -rf -- "+singleQuote(dir)); err != nil {
+		if _, err := r.Run(ctx, "rm -rf -- "+shellQuote(dir)); err != nil {
 			return fmt.Errorf("remove %s: %w", dir, err)
 		}
 	}
@@ -81,9 +81,4 @@ func validateDataDir(dir string) error {
 		return fmt.Errorf("unsafe data directory %q: must be at least %d segments deep", dir, minDataDirDepth)
 	}
 	return nil
-}
-
-// singleQuote wraps s in POSIX single quotes.
-func singleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
