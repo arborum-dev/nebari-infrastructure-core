@@ -7,8 +7,10 @@ package rke2
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	rke2host "github.com/nebari-dev/nebari-infrastructure-core/pkg/rke2"
 	"github.com/nebari-dev/nebari-infrastructure-core/pkg/storage/longhorn"
@@ -102,6 +104,14 @@ func (c *Config) Validate() error {
 	if c.Host == "" {
 		return fmt.Errorf("cluster.rke2.host is required")
 	}
+	if err := checkAddress("cluster.rke2.host", c.Host); err != nil {
+		return err
+	}
+	if c.APIServerAddress != "" {
+		if err := checkAddress("cluster.rke2.api_server_address", c.APIServerAddress); err != nil {
+			return err
+		}
+	}
 	if c.Version == "" {
 		return fmt.Errorf("cluster.rke2.version is required")
 	}
@@ -119,6 +129,15 @@ func (c *Config) Validate() error {
 	}
 	if _, err := rke2host.RenderConfig(c.apiServerAddress(), c.Config); err != nil {
 		return fmt.Errorf("cluster.rke2.config: %w", err)
+	}
+	return nil
+}
+
+// checkAddress rejects a value that is not a bare hostname or IP address,
+// such as a URL or host:port. A colon is accepted only in an IPv6 literal.
+func checkAddress(field, value string) error {
+	if strings.Contains(value, "/") || (strings.Contains(value, ":") && net.ParseIP(value) == nil) {
+		return fmt.Errorf("%s %q must be a hostname or IP address, without scheme, port or path", field, value)
 	}
 	return nil
 }

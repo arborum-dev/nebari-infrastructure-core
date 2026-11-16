@@ -63,6 +63,52 @@ func TestConfigValidate(t *testing.T) {
 			},
 		},
 		{name: "invalid rke2 config value", mutate: func(c *Config) { c.Config = map[string]any{"tls-san": 5} }, wantErr: "cluster.rke2.config"},
+		{name: "host name", mutate: func(c *Config) { c.Host = "node1.example.com" }},
+		{name: "host IPv6", mutate: func(c *Config) { c.Host = "2001:db8::10" }},
+		{
+			name:    "host with scheme",
+			mutate:  func(c *Config) { c.Host = "https://x" },
+			wantErr: `cluster.rke2.host "https://x" must be a hostname or IP address, without scheme, port or path`,
+			exact:   true,
+		},
+		{
+			name:    "host with port",
+			mutate:  func(c *Config) { c.Host = "203.0.113.10:22" },
+			wantErr: `cluster.rke2.host "203.0.113.10:22" must be a hostname or IP address, without scheme, port or path`,
+			exact:   true,
+		},
+		{
+			name:    "host with path",
+			mutate:  func(c *Config) { c.Host = "node1.example.com/rke2" },
+			wantErr: `cluster.rke2.host "node1.example.com/rke2" must be a hostname or IP address, without scheme, port or path`,
+			exact:   true,
+		},
+		{
+			name:    "host bracketed IPv6",
+			mutate:  func(c *Config) { c.Host = "[2001:db8::10]" },
+			wantErr: `cluster.rke2.host "[2001:db8::10]" must be a hostname or IP address, without scheme, port or path`,
+			exact:   true,
+		},
+		{name: "api server address name", mutate: func(c *Config) { c.APIServerAddress = "api.example.com" }},
+		{name: "api server address IPv6", mutate: func(c *Config) { c.APIServerAddress = "::1" }},
+		{
+			name:    "api server address with scheme",
+			mutate:  func(c *Config) { c.APIServerAddress = "https://x" },
+			wantErr: `cluster.rke2.api_server_address "https://x" must be a hostname or IP address, without scheme, port or path`,
+			exact:   true,
+		},
+		{
+			name:    "api server address with port",
+			mutate:  func(c *Config) { c.APIServerAddress = "127.0.0.1:6443" },
+			wantErr: `cluster.rke2.api_server_address "127.0.0.1:6443" must be a hostname or IP address, without scheme, port or path`,
+			exact:   true,
+		},
+		{
+			name:    "api server address with path",
+			mutate:  func(c *Config) { c.APIServerAddress = "api.example.com/k8s" },
+			wantErr: `cluster.rke2.api_server_address "api.example.com/k8s" must be a hostname or IP address, without scheme, port or path`,
+			exact:   true,
+		},
 	}
 
 	for _, tt := range tests {
